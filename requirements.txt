@@ -20,5 +20,10 @@ typer>=0.15,<1
 python-dotenv>=1.0,<2
 rich>=13.7
 
+# Web UI (faceprov serve)
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+
 # Dev
 pytest>=8.0

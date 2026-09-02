@@ -74,9 +74,17 @@ def run_search(
     *,
     threshold: float,
     max_candidates: int,
+    progress=None,
 ) -> SearchOutcome:
+    def p(stage: str, detail: str) -> None:
+        if progress:
+            progress(stage, detail)
+
     lens_res = lens.search(probe_image_url, api_key)
+    p("search", f"Google Lens: {len(lens_res.matches)} visual matches"
+                + (f", entity '{lens_res.entity_name}'" if lens_res.entity_name else ", no entity"))
     y_matches, y_meta = yandex.search(probe_image_url, api_key, bbox_norm=probe.bbox_norm)
+    p("search", f"Yandex Images: {len(y_matches)} visual matches")
 
     outcome = SearchOutcome(
         path_taken="A:entity" if lens_res.entity_name else "B:visual",
@@ -96,8 +104,9 @@ def run_search(
     if lens_res.entity_name:
         profiles = lens.find_social_profiles(lens_res.entity_name, api_key)
         outcome.social_profiles = profiles
-        for p in profiles:
-            specs.append(CandidateSpec(image_url="", source_url=p["link"],
+        p("search", f"Path A - {len(profiles)} candidate social profiles for '{lens_res.entity_name}'")
+        for prof in profiles:
+            specs.append(CandidateSpec(image_url="", source_url=prof["link"],
                                        engine="profile", image_origin="og:image"))
 
     for m in visual:
@@ -122,7 +131,7 @@ def run_search(
             page_cache[spec.source_url] = page
 
         image_url = spec.image_url
-        if not image_url:                       # og:image spec — needs the harvest
+        if not image_url:                       # og:image spec - needs the harvest
             image_url = page.og_image
         if not image_url:
             continue
@@ -146,6 +155,9 @@ def run_search(
 
         verified += 1
         outcome.candidates.append(res)
+        mark = "accept" if res.accepted else "reject"
+        p("verify", f"[{mark}] cos {res.best_cosine:+.3f}  {res.engine}  "
+                    f"{(res.platform or '') and res.platform + '  '}{res.source_url[:60]}")
         if res.accepted:
             outcome.accepted.append(res)
             if res.platform:                    # confident hit on a real platform

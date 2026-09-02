@@ -153,8 +153,11 @@ src/faceprov/
   evidence.py        Stage D — canonical bundle + keccak Merkle tree
   _keccak.py         vendored keccak-256 (no-dependency Merkle hashing)
   chain.py           Stage E/F — web3 deploy, attest, read
-  pipeline.py        end-to-end orchestration + reverify + tamper_demo
-  cli.py             `faceprov run|verify|tamper|deploy`
+  pipeline.py        end-to-end orchestration (+ progress hooks) + reverify + tamper_demo
+  cli.py             `faceprov run|serve|verify|tamper|deploy`
+web/
+  server.py          FastAPI: upload -> background job -> streamed progress -> verify/tamper
+  index.html         single-page UI (vanilla JS)
 contracts/
   AttestationRegistry.sol
   AttestationRegistry.json   committed abi + bytecode (no solc needed to deploy)
@@ -192,12 +195,20 @@ faceprov deploy                     # or: python -m faceprov.cli deploy
 # (also written to deployments.json)
 ```
 
-### Run the pipeline
+### Run the pipeline (CLI)
 ```bash
 python -m faceprov.cli run --image path/to/face.jpg
 ```
 Output: path taken, candidates + scores, the matched post, the Merkle root, the IPFS
 CID, and the on-chain attestation id + explorer link.
+
+### Run the pipeline (web UI)
+```bash
+faceprov serve            # -> http://127.0.0.1:8000
+```
+Drop in a face image, watch each stage stream live (detect → pin → search → verify →
+bundle → IPFS → on-chain), then hit **Re-verify against chain** and **Tamper test**
+from the result page. This is the easiest thing to screen-record.
 
 ### Re-verify an attestation
 ```bash
@@ -242,7 +253,8 @@ asymmetry rather than hide it.)_
   pass SFace. This tool records provenance, it is not a liveness/AIGC detector.
 - **Sepolia is a testnet** — records are real and explorer-visible but not
   economically secured like mainnet.
-- **No website** — CLI + screen recording only, per the task.
+- **No hosted website** — `faceprov serve` is a local demo UI (localhost, single
+  user, in-memory jobs), not a deployed service. The task requires no website.
 
 ---
 

@@ -108,6 +108,28 @@ def run(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+):
+    """Launch the web UI (upload a face, watch the pipeline run, verify)."""
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parents[2]
+    if str(repo_root) not in _sys.path:
+        _sys.path.insert(0, str(repo_root))
+    try:
+        from web.server import serve as _serve
+    except ModuleNotFoundError as e:
+        raise typer.Exit(
+            f"web deps missing ({e}); pip install fastapi uvicorn python-multipart"
+        )
+    console.print(f"[bold]FaceProv UI:[/bold] http://{host}:{port}")
+    _serve(host, port)
+
+
+@app.command()
 def verify(id: int = typer.Option(..., "--id", help="Attestation id to re-verify.")):
     """Re-verify an on-chain attestation against IPFS + live sources."""
     from .pipeline import reverify

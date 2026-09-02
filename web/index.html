@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FaceProv</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #2b3444;
+    --fg: #e6edf3; --muted: #9aa7b4; --accent: #4c9aff; --good: #3fb950;
+    --bad: #f85149; --warn: #d29922; --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); text-decoration: none; word-break: break-all; }
+  a:hover { text-decoration: underline; }
+  header { padding: 18px 28px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .3px; }
+  header .tag { color: var(--muted); font-size: 12px; }
+  header .chain { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 28px 80px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; margin-bottom: 20px; }
+  .panel h2 { margin: 0 0 14px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--muted); font-weight: 600; }
+
+  /* upload */
+  #drop { border: 1.5px dashed var(--border); border-radius: 10px; padding: 28px;
+    text-align: center; cursor: pointer; transition: .15s; color: var(--muted); }
+  #drop.hover { border-color: var(--accent); background: var(--panel2); color: var(--fg); }
+  #drop img { max-height: 220px; border-radius: 8px; margin-top: 12px; }
+  .row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 9px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+  label.chk { display: flex; align-items: center; gap: 7px; color: var(--muted); cursor: pointer; }
+
+  /* log */
+  #log { font-family: var(--mono); font-size: 12.5px; max-height: 340px; overflow-y: auto;
+    background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  #log .line { display: flex; gap: 10px; padding: 2px 0; }
+  #log .t { color: var(--muted); flex: 0 0 46px; text-align: right; }
+  #log .badge { flex: 0 0 96px; color: var(--accent); }
+  #log .line.error .badge, #log .line.error .msg { color: var(--bad); }
+  #log .msg { color: var(--fg); white-space: pre-wrap; word-break: break-word; }
+
+  .verdict { font-size: 16px; font-weight: 700; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
+  .verdict.match { background: rgba(63,185,80,.12); color: var(--good); border: 1px solid rgba(63,185,80,.3); }
+  .verdict.nomatch { background: rgba(248,81,73,.10); color: var(--bad); border: 1px solid rgba(248,81,73,.3); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .kv { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .kv .k { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  .kv .v { font-family: var(--mono); font-size: 13px; margin-top: 3px; word-break: break-all; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .5px; }
+  td.mono { font-family: var(--mono); }
+  .pill { padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .pill.yes { background: rgba(63,185,80,.15); color: var(--good); }
+  .pill.no { background: rgba(248,81,73,.12); color: var(--bad); }
+  .tblwrap { overflow-x: auto; }
+
+  .mono-block { font-family: var(--mono); font-size: 12.5px; background: #0a0d12;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; word-break: break-all; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+  [hidden] { display: none !important; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>FaceProv</h1>
+  <span class="tag">face scan → web search → blockchain attestation</span>
+  <span class="chain" id="chaininfo">…</span>
+</header>
+
+<main>
+  <div class="panel">
+    <h2>1 · Upload a face scan</h2>
+    <div id="drop">
+      <div id="dropmsg">Drop an image here, or click to choose</div>
+      <input type="file" id="file" accept="image/*" hidden />
+      <img id="preview" hidden alt="preview" />
+    </div>
+    <div class="row">
+      <button id="run" disabled>Run pipeline</button>
+      <label class="chk"><input type="checkbox" id="attest" checked /> write attestation on-chain</label>
+      <span id="runstate" class="hint"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="logpanel" hidden>
+    <h2>2 · Pipeline <span id="running" hidden><span class="spinner"></span></span></h2>
+    <div id="log"></div>
+  </div>
+
+  <div class="panel" id="results" hidden>
+    <h2>3 · Result</h2>
+    <div id="verdict" class="verdict"></div>
+    <div class="grid" id="summary"></div>
+
+    <div id="matchbox" hidden>
+      <h2>Matched post</h2>
+      <div class="grid" id="matchgrid"></div>
+    </div>
+
+    <h2 style="margin-top:18px">Candidates considered</h2>
+    <div class="tblwrap"><table id="cand"><thead><tr>
+      <th>engine</th><th>origin</th><th>cosine</th><th>accepted</th><th>platform</th><th>source</th>
+    </tr></thead><tbody></tbody></table></div>
+
+    <h2 style="margin-top:18px">Evidence bundle</h2>
+    <div class="kv"><div class="k">Merkle root (keccak256)</div><div class="v" id="root"></div></div>
+    <div class="kv" style="margin-top:8px"><div class="k">IPFS bundle</div><div class="v"><a id="bundlelink" target="_blank"></a></div></div>
+
+    <div id="chainbox" hidden>
+      <h2 style="margin-top:18px">On-chain attestation</h2>
+      <div class="grid" id="chaingrid"></div>
+      <div class="row">
+        <button id="btnverify" class="ghost">Re-verify against chain</button>
+        <button id="btntamper" class="ghost">Tamper test</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="verifypanel" hidden>
+    <h2>Re-verification <span id="verifyspin" hidden><span class="spinner"></span></span></h2>
+    <div id="verdict2" class="verdict"></div>
+    <div class="tblwrap"><table id="checks"><thead><tr><th>check</th><th>result</th><th>detail</th></tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div class="panel" id="tamperpanel" hidden>
+    <h2>Tamper-evidence test <span id="tamperspin" hidden><span class="spinner"></span></span></h2>
+    <div id="tamperout"></div>
+  </div>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let CONFIG = {};
+let CURRENT_ATTESTATION = null;
+
+fetch("/api/config").then(r => r.json()).then(c => {
+  CONFIG = c;
+  $("#chaininfo").textContent =
+    `chain ${c.chain_id} · registry ${c.registry ? c.registry.slice(0,10)+"…" : "not deployed"} · threshold ${c.threshold}`;
+});
+
+// ---- upload handling ----
+const drop = $("#drop"), fileInput = $("#file");
+let chosenFile = null;
+
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("hover"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("hover"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault(); drop.classList.remove("hover");
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+
+function setFile(f) {
+  chosenFile = f;
+  const img = $("#preview");
+  img.src = URL.createObjectURL(f);
+  img.hidden = false;
+  $("#dropmsg").textContent = f.name;
+  $("#run").disabled = false;
+}
+
+// ---- run ----
+$("#run").addEventListener("click", async () => {
+  if (!chosenFile) return;
+  $("#run").disabled = true;
+  $("#runstate").textContent = "uploading…";
+  ["#results", "#verifypanel", "#tamperpanel"].forEach(s => $(s).hidden = true);
+  $("#log").innerHTML = "";
+  $("#logpanel").hidden = false;
+  $("#running").hidden = false;
+
+  const fd = new FormData();
+  fd.append("image", chosenFile);
+  fd.append("attest", $("#attest").checked ? "true" : "false");
+
+  let job;
+  try {
+    const r = await fetch("/api/run", { method: "POST", body: fd });
+    job = await r.json();
+    if (!r.ok) throw new Error(job.detail || "run failed");
+  } catch (e) {
+    $("#runstate").textContent = "error: " + e.message;
+    $("#run").disabled = false; $("#running").hidden = true;
+    return;
+  }
+  $("#runstate").textContent = "job " + job.job_id;
+  poll(job.job_id);
+});
+
+let seen = 0;
+async function poll(jobId) {
+  const r = await fetch("/api/jobs/" + jobId);
+  const j = await r.json();
+  for (const ev of j.events.slice(seen)) addLine(ev);
+  seen = j.events.length;
+
+  if (j.status === "done") {
+    $("#running").hidden = true;
+    $("#runstate").textContent = "done";
+    $("#run").disabled = false;
+    renderResult(j.result);
+  } else if (j.status === "error") {
+    $("#running").hidden = true;
+    $("#runstate").textContent = "error";
+    $("#run").disabled = false;
+    addLine({ t: "", stage: "error", detail: j.error }, true);
+  } else {
+    setTimeout(() => poll(jobId), 1000);
+  }
+}
+
+function addLine(ev, isErr) {
+  const div = document.createElement("div");
+  div.className = "line" + (isErr || ev.stage === "error" ? " error" : "");
+  div.innerHTML =
+    `<span class="t">${ev.t !== "" ? ev.t + "s" : ""}</span>` +
+    `<span class="badge">${ev.stage}</span>` +
+    `<span class="msg"></span>`;
+  div.querySelector(".msg").textContent = ev.detail;
+  $("#log").appendChild(div);
+  $("#log").scrollTop = $("#log").scrollHeight;
+}
+
+// ---- render result ----
+function kv(k, v, isHtml) {
+  const d = document.createElement("div");
+  d.className = "kv";
+  d.innerHTML = `<div class="k">${k}</div><div class="v"></div>`;
+  if (isHtml) d.querySelector(".v").innerHTML = v; else d.querySelector(".v").textContent = v;
+  return d;
+}
+
+function renderResult(res) {
+  $("#results").hidden = false;
+  const v = $("#verdict");
+  v.className = "verdict " + (res.matched ? "match" : "nomatch");
+  v.textContent = res.matched ? "MATCH FOUND" : "NO MATCH FOUND — no candidate cleared the threshold";
+
+  const s = $("#summary"); s.innerHTML = "";
+  s.append(kv("path taken", res.path_taken));
+  s.append(kv("entity", res.entity_name || "—"));
+  s.append(kv("candidates", res.candidates.length));
+
+  // matched post
+  const mb = $("#matchbox");
+  if (res.matched) {
+    mb.hidden = false;
+    const g = $("#matchgrid"); g.innerHTML = "";
+    g.append(kv("post", `<a href="${res.match.source_url}" target="_blank">${res.match.source_url}</a>`, true));
+    g.append(kv("cosine", (+res.match.cosine).toFixed(4)));
+    g.append(kv("platform", res.match.platform || "— (not a social platform)"));
+    g.append(kv("engine", res.match.engine));
+    if (res.match.author_handle) g.append(kv("author", res.match.author_handle));
+  } else {
+    mb.hidden = true;
+  }
+
+  // candidates
+  const tb = $("#cand tbody"); tb.innerHTML = "";
+  for (const c of res.candidates) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${c.engine}</td><td>${c.image_origin || ""}</td>` +
+      `<td class="mono">${(+c.best_cosine).toFixed(4)}</td>` +
+      `<td><span class="pill ${c.accepted ? "yes" : "no"}">${c.accepted ? "yes" : "no"}</span></td>` +
+      `<td>${c.platform || "-"}</td><td class="mono"></td>`;
+    tr.lastElementChild.textContent = (c.source_url || "").slice(0, 70);
+    tb.appendChild(tr);
+  }
+
+  $("#root").textContent = res.merkle_root;
+  const bl = $("#bundlelink");
+  bl.href = res.bundle_url; bl.textContent = res.bundle_url;
+
+  // chain
+  const cb = $("#chainbox");
+  if (res.attestation) {
+    cb.hidden = false;
+    CURRENT_ATTESTATION = res.attestation.id;
+    const g = $("#chaingrid"); g.innerHTML = "";
+    g.append(kv("attestation id", "#" + res.attestation.id));
+    g.append(kv("block", res.attestation.block));
+    g.append(kv("tx", `<a href="${res.attestation.explorer}" target="_blank">${res.attestation.tx.slice(0,20)}…</a>`, true));
+    $("#btnverify").disabled = false;
+    $("#btntamper").disabled = false;
+  } else {
+    cb.hidden = true;
+  }
+}
+
+// ---- verify ----
+$("#btnverify").addEventListener("click", async () => {
+  if (CURRENT_ATTESTATION == null) return;
+  $("#verifypanel").hidden = false;
+  $("#verifyspin").hidden = false;
+  $("#verdict2").textContent = ""; $("#checks tbody").innerHTML = "";
+  try {
+    const r = await fetch("/api/verify/" + CURRENT_ATTESTATION, { method: "POST" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || "verify failed");
+    const v = $("#verdict2");
+    v.className = "verdict " + (j.verdict === "PASS" ? "match" : "nomatch");
+    v.textContent = "Re-verification: " + j.verdict;
+    const tb = $("#checks tbody");
+    for (const c of j.checks) {
+      const ok = c.ok ?? c.image_ok ?? true;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${c.check}</td>` +
+        `<td><span class="pill ${ok === false ? "no" : "yes"}">${ok === false ? "FAIL" : (ok === null ? "skip" : "ok")}</span></td>` +
+        `<td class="mono"></td>`;
+      tr.lastElementChild.textContent = JSON.stringify(Object.fromEntries(
+        Object.entries(c).filter(([k]) => k !== "check"))).slice(0, 160);
+      tb.appendChild(tr);
+    }
+  } catch (e) {
+    $("#verdict2").className = "verdict nomatch";
+    $("#verdict2").textContent = "error: " + e.message;
+  } finally {
+    $("#verifyspin").hidden = true;
+  }
+});
+
+// ---- tamper ----
+$("#btntamper").addEventListener("click", async () => {
+  if (CURRENT_ATTESTATION == null) return;
+  $("#tamperpanel").hidden = false;
+  $("#tamperspin").hidden = false;
+  $("#tamperout").innerHTML = "";
+  try {
+    const r = await fetch("/api/tamper/" + CURRENT_ATTESTATION, { method: "POST" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || "tamper failed");
+    const broke = !j.tampered_matches_chain;
+    $("#tamperout").innerHTML =
+      `<div class="verdict ${broke ? "match" : "nomatch"}">` +
+      (broke ? "TAMPER DETECTED — recomputed root no longer matches the chain" : "unexpected: roots still match") +
+      `</div>` +
+      `<div class="kv"><div class="k">on-chain root</div><div class="v">${j.onchain_root}</div></div>` +
+      `<div class="kv" style="margin-top:8px"><div class="k">original recomputed root ${j.original_matches_chain ? "✓ matches" : "✗"}</div><div class="v">${j.original_recomputed_root}</div></div>` +
+      `<div class="kv" style="margin-top:8px"><div class="k">edited field</div><div class="v">${j.tampered_field} = ${j.tampered_value}</div></div>` +
+      `<div class="kv" style="margin-top:8px"><div class="k">root after edit</div><div class="v">${j.tampered_root}</div></div>`;
+  } catch (e) {
+    $("#tamperout").innerHTML = `<div class="verdict nomatch">error: ${e.message}</div>`;
+  } finally {
+    $("#tamperspin").hidden = true;
+  }
+});
+</script>
+</body>
+</html>

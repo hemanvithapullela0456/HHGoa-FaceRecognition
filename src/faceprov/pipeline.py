@@ -6,44 +6,63 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from . import __version__
+from . import face as face_mod
 from .chain import Chain
 from .config import Config
 from .evidence import EvidenceBundle, set_leaf_path, sha256_bytes
-from . import face as face_mod
 from .face import cosine, detect_and_encode, probe_face
 from .search.imagehost import host_probe
 from .search.ipfs import Pinata
 from .search.router import run_search
+
+Progress = Callable[[str, str], None]
+
+
+def _noop(stage: str, detail: str) -> None:  # default progress sink
+    pass
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
+def run_pipeline(
+    image_path: str, cfg: Config, *, attest: bool = True, progress: Progress | None = None
+) -> dict:
+    p = progress or _noop
     t0 = time.time()
     img_path = Path(image_path)
     probe_bytes = img_path.read_bytes()
 
     # ---- Stage A ----
+    p("detect", "detecting and encoding the face (YuNet + SFace)")
     probe = probe_face(img_path)
+    p("detect", f"face found - det_score {probe.det_score:.2f}, 128-d embedding")
 
     # ---- pin probe to IPFS (the tamper-evidence record) ----
+    p("pin_probe", "pinning the probe image to IPFS (Pinata)")
     pinata = Pinata(cfg.pinata_jwt, cfg.pinata_gateway)
     probe_cid = pinata.pin_bytes(probe_bytes, name=f"probe-{img_path.stem}.jpg")
     ipfs_url = pinata.gateway_url(probe_cid)
+    p("pin_probe", f"probe CID {probe_cid}")
 
     # ---- host the probe where search-engine crawlers can fetch it ----
     query_url, query_host = host_probe(probe_bytes, fallback_url=ipfs_url,
                                        filename=f"probe-{img_path.stem}.jpg")
+    p("host_probe", f"probe hosted for search via {query_host}")
 
     # ---- Stage B ----
+    p("search", "reverse-image search: Google Lens + Yandex Images")
     search = run_search(
         probe, query_url, cfg.serpapi_key,
         threshold=cfg.match_threshold, max_candidates=cfg.max_candidates,
+        progress=p,
     )
+    p("search", f"path {search.path_taken} - {len(search.candidates)} candidates, "
+                f"{len(search.accepted)} above threshold")
 
     # ---- Stage D: bundle ----
     bundle = EvidenceBundle()
@@ -111,9 +130,11 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
         "created_at": _now(),
     }
 
+    p("bundle", f"built evidence bundle - Merkle root {bundle.root()[:18]}...")
     doc = bundle.to_json()
     bundle_cid = pinata.pin_json(doc, name=f"evidence-{img_path.stem}.json")
     doc["_pinned_cid"] = bundle_cid
+    p("pin_bundle", f"evidence bundle pinned to IPFS - CID {bundle_cid}")
 
     result = {
         "matched": matched,
@@ -128,6 +149,7 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
 
     # ---- Stage E ----
     if attest and cfg.registry_address and cfg.deployer_key:
+        p("attest", f"writing attestation on-chain (chain id {cfg.chain_id})")
         chain = Chain.from_config(cfg, signer=True)
         att = chain.attest(
             cfg.registry_address,
@@ -137,12 +159,16 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
             match_url=(bundle.match.get("source_url") or "NO_MATCH"),
         )
         result["attestation"] = att
+        p("attest", f"attestation #{att['id']} - tx {att['tx']}")
+    elif attest:
+        p("attest", "skipped - no registry address / deployer key configured")
 
+    p("done", f"complete in {round(time.time() - t0, 1)}s")
     return result
 
 
 def reverify(attestation_id: int, cfg: Config) -> dict:
-    """Stage F — pull the on-chain record, recompute the root, re-hash the sources."""
+    """Stage F - pull the on-chain record, recompute the root, re-hash the sources."""
     chain = Chain.from_config(cfg)
     onchain = chain.get(cfg.registry_address, attestation_id)
 
