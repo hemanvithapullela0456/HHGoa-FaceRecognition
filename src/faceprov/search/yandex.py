@@ -34,15 +34,18 @@ def search(
 
     matches: list[VisualMatch] = []
     for m in data.get("image_results", []):
-        link = m.get("link") or m.get("source")
+        link = m.get("link")
         if not link:
             continue
+        thumb = m.get("thumbnail")
+        if isinstance(thumb, dict):
+            thumb = thumb.get("link", "")
         matches.append(
             VisualMatch(
                 title=m.get("title", ""),
                 source=m.get("source", ""),
                 source_url=link,
-                thumbnail=m.get("original") or m.get("thumbnail", ""),
+                thumbnail=thumb or "",
                 engine="yandex_images",
             )
         )

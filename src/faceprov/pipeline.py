@@ -11,7 +11,9 @@ from . import __version__
 from .chain import Chain
 from .config import Config
 from .evidence import EvidenceBundle, set_leaf_path, sha256_bytes
+from . import face as face_mod
 from .face import cosine, detect_and_encode, probe_face
+from .search.imagehost import host_probe
 from .search.ipfs import Pinata
 from .search.router import run_search
 
@@ -28,14 +30,18 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
     # ---- Stage A ----
     probe = probe_face(img_path)
 
-    # ---- pin probe so search engines (and later verifiers) can reach it ----
+    # ---- pin probe to IPFS (the tamper-evidence record) ----
     pinata = Pinata(cfg.pinata_jwt, cfg.pinata_gateway)
     probe_cid = pinata.pin_bytes(probe_bytes, name=f"probe-{img_path.stem}.jpg")
-    probe_url = pinata.gateway_url(probe_cid)
+    ipfs_url = pinata.gateway_url(probe_cid)
+
+    # ---- host the probe where search-engine crawlers can fetch it ----
+    query_url, query_host = host_probe(probe_bytes, fallback_url=ipfs_url,
+                                       filename=f"probe-{img_path.stem}.jpg")
 
     # ---- Stage B ----
     search = run_search(
-        probe, probe_url, cfg.serpapi_key,
+        probe, query_url, cfg.serpapi_key,
         threshold=cfg.match_threshold, max_candidates=cfg.max_candidates,
     )
 
@@ -44,18 +50,20 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
     bundle.probe = {
         "image_sha256": sha256_bytes(probe_bytes),
         "image_cid": probe_cid,
+        "image_ipfs_url": ipfs_url,
         "embedding_digest": probe.embedding_digest,
         "bbox_pixels": [round(v, 2) for v in probe.bbox],
         "bbox_norm": [round(v, 4) for v in probe.bbox_norm],
         "det_score": round(probe.det_score, 4),
-        "detector": "insightface/buffalo_l/retinaface",
-        "encoder": "insightface/buffalo_l/arcface-r100",
+        "detector": face_mod.DETECTOR_VERSION,
+        "encoder": face_mod.ENCODER_VERSION,
     }
     bundle.search = {
         "path_taken": search.path_taken,
         "entity_name": search.entity_name,
         "entity_type": search.entity_type,
-        "query_image_url": probe_url,
+        "query_image_url": query_url,
+        "query_image_host": query_host,
         "lens_meta": search.lens_meta,
         "yandex_meta": search.yandex_meta,
         "social_profiles": search.social_profiles,

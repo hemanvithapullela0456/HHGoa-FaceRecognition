@@ -64,6 +64,6 @@ class Config:
             explorer_url=_first_env("EXPLORER_URL", default=DEFAULT_EXPLORER),
             deployer_key=_req("DEPLOYER_PRIVATE_KEY") if require_chain else os.getenv("DEPLOYER_PRIVATE_KEY", ""),
             registry_address=os.getenv("ATTESTATION_REGISTRY_ADDRESS", "").strip(),
-            match_threshold=float(os.getenv("FACEPROV_MATCH_THRESHOLD", "0.38")),
+            match_threshold=float(os.getenv("FACEPROV_MATCH_THRESHOLD", "0.36")),
             max_candidates=int(os.getenv("FACEPROV_MAX_CANDIDATES", "12")),
         )

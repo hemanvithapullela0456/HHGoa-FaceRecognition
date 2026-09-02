@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import typer
 from rich.console import Console
@@ -10,8 +11,19 @@ from rich.table import Table
 
 from .config import DEPLOYMENTS_FILE, Config
 
+# Windows consoles default to cp1252, which cannot encode the box/emoji glyphs rich
+# emits — force UTF-8 so output never crashes mid-run.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):
+        pass
+
 app = typer.Typer(add_completion=False, help="Face-anchored provenance for image verification.")
 console = Console()
+
+_YES = "[green]yes[/green]"
+_NO = "[red]no[/red]"
 
 
 @app.command()
@@ -51,13 +63,15 @@ def run(
         title="search",
     ))
 
-    tbl = Table("engine", "cosine", "accepted", "source")
+    tbl = Table("engine", "origin", "cosine", "accepted", "platform", "source")
     for c in res["candidates"]:
         tbl.add_row(
             c["engine"],
+            c.get("image_origin", ""),
             f"{c['best_cosine']:.4f}",
-            "✅" if c["accepted"] else "❌",
-            (c["source_url"] or "")[:70],
+            _YES if c["accepted"] else _NO,
+            c.get("platform") or "-",
+            (c["source_url"] or "")[:60],
         )
     console.print(tbl)
 
@@ -115,7 +129,7 @@ def verify(id: int = typer.Option(..., "--id", help="Attestation id to re-verify
     tbl = Table("check", "result", "detail")
     for c in res["checks"]:
         ok = c.get("ok", c.get("image_ok", True))
-        mark = "✅" if ok else ("⚠️" if ok is None else "❌")
+        mark = _YES if ok else ("[yellow]skip[/yellow]" if ok is None else _NO)
         tbl.add_row(str(c.get("check")), mark, json.dumps({k: v for k, v in c.items() if k != "check"})[:80])
     console.print(tbl)
 
@@ -134,13 +148,14 @@ def tamper(
         object.__setattr__(cfg, "registry_address", json.loads(DEPLOYMENTS_FILE.read_text())["address"])
 
     res = tamper_demo(id, cfg, field_path=field or None, value=(value or None))
+    orig = "[green]matches chain[/green]" if res["original_matches_chain"] else "[red]MISMATCH[/red]"
+    tam = ("[red]DOES NOT MATCH - tamper detected[/red]"
+           if not res["tampered_matches_chain"] else "[green]matches (unexpected)[/green]")
     console.print(Panel.fit(
         f"on-chain root:          [yellow]{res['onchain_root']}[/yellow]\n"
-        f"original recomputed:    {res['original_recomputed_root']}  "
-        f"{'[green]✓ matches[/green]' if res['original_matches_chain'] else '[red]✗[/red]'}\n\n"
+        f"original recomputed:    {res['original_recomputed_root']}  {orig}\n\n"
         f"tampered field:         [red]{res['tampered_field']} = {res['tampered_value']}[/red]\n"
-        f"tampered root:          {res['tampered_root']}  "
-        f"{'[red]✗ DOES NOT MATCH — tamper detected[/red]' if not res['tampered_matches_chain'] else '[green]✓[/green]'}",
+        f"tampered root:          {res['tampered_root']}  {tam}",
         title="tamper-evidence demo",
     ))
 

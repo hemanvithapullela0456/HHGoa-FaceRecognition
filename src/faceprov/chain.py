@@ -14,18 +14,23 @@ from web3 import Web3
 from .config import DEPLOYMENTS_FILE, REPO_ROOT, Config
 
 CONTRACT_SRC = REPO_ROOT / "contracts" / "AttestationRegistry.sol"
+CONTRACT_ARTIFACT = REPO_ROOT / "contracts" / "AttestationRegistry.json"
 SOLC_VERSION = "0.8.24"
 
 
-def _compile() -> dict:
+def _artifact() -> dict:
+    """Prefer the committed abi+bytecode artifact; fall back to compiling with solcx."""
+    if CONTRACT_ARTIFACT.exists():
+        a = json.loads(CONTRACT_ARTIFACT.read_text())
+        return {"abi": a["abi"], "bytecode": a["bytecode"]}
+
     from solcx import compile_standard, install_solc
 
     install_solc(SOLC_VERSION)
-    src = CONTRACT_SRC.read_text()
     out = compile_standard(
         {
             "language": "Solidity",
-            "sources": {"AttestationRegistry.sol": {"content": src}},
+            "sources": {"AttestationRegistry.sol": {"content": CONTRACT_SRC.read_text()}},
             "settings": {
                 "optimizer": {"enabled": True, "runs": 200},
                 "outputSelection": {"*": {"*": ["abi", "evm.bytecode.object"]}},
@@ -34,7 +39,7 @@ def _compile() -> dict:
         solc_version=SOLC_VERSION,
     )
     c = out["contracts"]["AttestationRegistry.sol"]["AttestationRegistry"]
-    return {"abi": c["abi"], "bytecode": c["evm"]["bytecode"]["object"]}
+    return {"abi": c["abi"], "bytecode": "0x" + c["evm"]["bytecode"]["object"]}
 
 
 class Chain:
@@ -75,7 +80,7 @@ class Chain:
     # ---- deploy ----
     def deploy(self) -> dict:
         assert self.acct, "deployer private key required"
-        art = _compile()
+        art = _artifact()
         contract = self.w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"])
         tx = contract.constructor().build_transaction(self._tx_common())
         h, rcpt = self._send(tx)

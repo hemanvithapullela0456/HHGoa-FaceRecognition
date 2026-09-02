@@ -45,20 +45,32 @@ def search(image_url: str, api_key: str, *, hl: str = "en") -> LensResult:
             title=m.get("title", ""),
             source=m.get("source", ""),
             source_url=m.get("link", ""),
-            thumbnail=m.get("thumbnail", ""),
+            thumbnail=m.get("thumbnail", "") if isinstance(m.get("thumbnail"), str) else "",
         )
         for m in data.get("visual_matches", [])
         if m.get("link")
     ]
 
+    # Lens increasingly omits knowledge_graph; fall back to the "related content"
+    # rail, whose top query is usually the recognised entity's name.
+    entity_name = kg.get("title")
+    entity_type = kg.get("type") or kg.get("subtitle")
+    related = [rc.get("query", "") for rc in (data.get("related_content") or []) if rc.get("query")]
+    if not entity_name and related:
+        entity_name = related[0]
+        entity_type = "related_content_guess"
+
     return LensResult(
-        entity_name=kg.get("title"),
-        entity_type=kg.get("type") or kg.get("subtitle"),
+        entity_name=entity_name,
+        entity_type=entity_type,
         matches=matches,
         raw_search_metadata={
             "id": data.get("search_metadata", {}).get("id"),
             "google_lens_url": data.get("search_metadata", {}).get("google_lens_url"),
             "created_at": data.get("search_metadata", {}).get("created_at"),
+            "had_knowledge_graph": bool(kg),
+            "related_content_queries": related[:5],
+            "has_ai_overview": bool(data.get("ai_overview")),
         },
     )
 

@@ -10,7 +10,7 @@ source page was altered.
 
 ```
 face scan  ──▶  detect + encode  ──▶  web / social search  ──▶  face re-verification
-                                          (Google Lens                 (ArcFace cosine,
+                                          (Google Lens                 (SFace cosine,
                                            + Yandex,                     per-candidate
                                            entity router)                accept/reject)
                                                                               │
@@ -47,12 +47,15 @@ of the task spec unchanged.
 ## 2. Pipeline architecture
 
 ### Stage A — Face detection & encoding
-- **Detector + encoder:** [InsightFace](https://github.com/deepinsight/insightface)
-  `buffalo_l` pack — RetinaFace detection + ArcFace R100 512-d embedding.
+- **Detector + encoder:** OpenCV's built-in **YuNet** detector + **SFace** recognizer
+  (both ONNX, bundled with `opencv-python` — no compiler or extra runtime, which
+  matters on Windows where InsightFace/dlib need MSVC build tools). SFace is an
+  ArcFace-family model; output is a 128-d L2-normalized embedding.
+- Model files (~37 MB) auto-download once from the official `opencv_zoo` repo.
 - Output per input image: list of `(bbox, det_score, normed_embedding, landmarks)`.
 - The largest / highest-score face is the **probe**; its normalized bbox is reused as a
   native crop hint for Yandex.
-- Fallback path (documented, not default): `face_recognition` (dlib) 128-d encodings.
+- Identity match is a cosine threshold (default **0.36**, the OpenCV SFace reference).
 
 ### Stage B — Web / social search  *(genuine search, no hardcoded results)*
 
@@ -63,8 +66,13 @@ Two recall sources, unioned, because they fail differently:
 | **Google Lens** | SerpApi `google_lens` | high recall, `knowledge_graph` entity hints | noisy, needs verification |
 | **Yandex Images** | SerpApi `yandex_images` with `crop=l;t;r;b` | strongest on faces, native face-region query | ~4 source pages, URL input only |
 
-The probe is pinned to IPFS first and the gateway URL is handed to SerpApi (Yandex
-accepts URLs only), which doubles as the start of our provenance chain.
+**Probe hosting.** Reverse-image APIs fetch the probe by URL. It is pinned to IPFS
+for the tamper-evidence record, but public IPFS gateways are rate-limited and
+SerpApi's Yandex engine rejects them outright ("not publicly accessible"). So for
+the *query* the probe is also pushed to a plain image host (`catbox.moe`, no key)
+that both engines fetch reliably; the URL used is recorded in the evidence bundle.
+If that host is down the pipeline falls back to the IPFS gateway URL (Lens still
+works with it; Yandex recall drops).
 
 **Candidate image sourcing.** Logged-out social pages return almost nothing to a
 scraper, so the **SerpApi thumbnail** (the engine's own cached copy of the match) is
@@ -74,7 +82,8 @@ best-effort for its HTML hash, `og:image`, author handle, and caption — and th
 
 **Entity router — two paths, logged and surfaced in CLI output:**
 
-- **Path A · entity resolved.** Lens returns `knowledge_graph` → a name. We run a
+- **Path A · entity resolved.** Lens returns a `knowledge_graph` name (or, when it
+  omits one, the top `related_content` query as a lower-confidence guess). We run a
   targeted text search (SerpApi `google`) for that person's verified social profiles,
   harvest images from the top profile, and hand them to Stage C. High precision.
 - **Path B · no entity.** Union of Lens + Yandex visual matches → fetch each source
@@ -86,10 +95,11 @@ Every run records `path_taken`, per-source candidate counts, and query artifacts
 ### Stage C — Face re-verification
 - For every candidate image: detect faces, embed, compute **cosine similarity** to the
   probe embedding.
-- Accept if `cos ≥ THRESHOLD` (default **0.38**, tuned on the recall study below);
+- Accept if `cos ≥ THRESHOLD` (default **0.36**, the OpenCV SFace reference value;
+  revisit against the recall study below);
   otherwise **reject with the score shown**.
 - A knowledge-graph name is *not* proof — lookalikes are common and a profile can
-  contain other people. ArcFace is doing real work here, not decoration.
+  contain other people. The face re-check is doing real work here, not decoration.
 - If nothing clears threshold → clean `NO_MATCH_FOUND` terminal state listing every
   rejected candidate and its score.
 
@@ -122,7 +132,7 @@ bundle is pinned to IPFS so re-verification is public.
 2. Fetch the bundle from IPFS by CID; recompute the Merkle root → must equal on-chain.
 3. Re-fetch each source page/image; recompute sha256 → flag any leaf whose hash drifted
    ("source page changed since attestation").
-4. Re-run ArcFace on the winning candidate vs. the probe digest → reprint the score.
+4. Re-run SFace on the winning candidate vs. the probe digest → reprint the score.
 5. Print a green/red verdict per leaf.
 
 ---
@@ -131,22 +141,25 @@ bundle is pinned to IPFS so re-verification is public.
 
 ```
 src/faceprov/
-  face.py            Stage A — detect + encode (InsightFace)
+  face.py            Stage A — detect + encode (OpenCV YuNet + SFace)
   search/
     ipfs.py          Pinata pin (probe + bundle)
-    lens.py          SerpApi Google Lens client
+    imagehost.py     catbox upload of the probe for the search query
+    lens.py          SerpApi Google Lens client (+ related_content fallback)
     yandex.py        SerpApi Yandex Images client (crop param)
     harvest.py       fetch source pages, extract candidate images
-    router.py        entity router (Path A / Path B), fusion
+    router.py        entity router (Path A / Path B), engine fusion
   verify.py          Stage C — cosine re-verification
-  evidence.py        Stage D — canonical bundle + Merkle tree
+  evidence.py        Stage D — canonical bundle + keccak Merkle tree
+  _keccak.py         vendored keccak-256 (no-dependency Merkle hashing)
   chain.py           Stage E/F — web3 deploy, attest, read
-  pipeline.py        end-to-end orchestration
-  cli.py             `faceprov run|verify|deploy`
+  pipeline.py        end-to-end orchestration + reverify + tamper_demo
+  cli.py             `faceprov run|verify|tamper|deploy`
 contracts/
   AttestationRegistry.sol
+  AttestationRegistry.json   committed abi + bytecode (no solc needed to deploy)
 scripts/
-  deploy.py          compile (py-solc-x) + deploy to the configured testnet
+  deploy.py          deploy to the configured testnet
 eval/
   recall_study.py    30-identity recall benchmark
   identities.csv     15 public figures + 15 consenting private individuals
@@ -164,15 +177,19 @@ tests/
 
 ### Setup
 ```bash
-python -m venv .venv && . .venv/Scripts/activate     # Windows: .venv\Scripts\Activate.ps1
+python -m venv .venv
+.venv\Scripts\Activate.ps1          # Windows PowerShell  (bash: . .venv/bin/activate)
 pip install -r requirements.txt
-cp .env.example .env        # fill in keys
+pip install -e .                    # exposes the `faceprov` command
+copy .env.example .env              # then fill in the keys
 ```
+First `run` auto-downloads the YuNet + SFace models (~37 MB) to `~/.faceprov/models/`.
 
 ### Deploy the contract (one time)
 ```bash
-python -m faceprov.cli deploy
-# writes contract address to .env / deployments.json
+faceprov deploy                     # or: python -m faceprov.cli deploy
+# prints the address; paste it into .env as ATTESTATION_REGISTRY_ADDRESS
+# (also written to deployments.json)
 ```
 
 ### Run the pipeline
@@ -222,7 +239,7 @@ asymmetry rather than hide it.)_
   seen at attestation time, which is the point.
 - **Yandex via SerpApi caps at ~4 source pages** and needs a public image URL.
 - **Deepfake robustness is out of scope** — a good synthetic face of a real person can
-  pass ArcFace. This tool records provenance, it is not a liveness/AIGC detector.
+  pass SFace. This tool records provenance, it is not a liveness/AIGC detector.
 - **Sepolia is a testnet** — records are real and explorer-visible but not
   economically secured like mainnet.
 - **No website** — CLI + screen recording only, per the task.
@@ -231,9 +248,16 @@ asymmetry rather than hide it.)_
 
 ## 7. Blockchain used
 
-**Ethereum Sepolia** (public testnet, chain id 11155111) by default. Contract:
-`AttestationRegistry.sol`, deployed address + ABI + deploy tx in `deployments.json`.
-Explorer: `https://sepolia.etherscan.io/address/<addr>`.
+**Ethereum Sepolia** (public testnet, chain id 11155111) by default.
+Contract `AttestationRegistry.sol` — live deployment:
+
+| | |
+|---|---|
+| Address | [`0xB8d2a9E923949EBc6D9Dc4d5e925F5554cEE89C7`](https://sepolia.etherscan.io/address/0xB8d2a9E923949EBc6D9Dc4d5e925F5554cEE89C7) |
+| Deploy tx | `0x18d05ff0400b435ee5e051b07be4c7196c5b0110c5b1c30b600ec9ea518f3110` |
+
+Address + ABI + deploy tx are also in `deployments.json`. Run `faceprov deploy`
+to deploy your own instance.
 
 The chain is not hard-coded — set `RPC_URL` / `CHAIN_ID` / `EXPLORER_URL` in `.env`
 to deploy the same contract to Base Sepolia, Optimism Sepolia, a local Anvil node,

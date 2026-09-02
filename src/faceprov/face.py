@@ -1,7 +1,17 @@
-"""Stage A — face detection & encoding via InsightFace (RetinaFace + ArcFace R100)."""
+"""Stage A — face detection & encoding.
+
+Backend: OpenCV's built-in **YuNet** detector + **SFace** recognizer (both ONNX,
+shipped with `opencv-python`, no compiler / no extra deps — important on Windows).
+SFace is an ArcFace-family model producing a 128-d embedding; identity match is a
+cosine-similarity threshold (~0.36 per the OpenCV reference).
+
+The model files (~37 MB total) are fetched once from the official `opencv_zoo`
+repository into `~/.faceprov/models/`.
+"""
 from __future__ import annotations
 
 import hashlib
+import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -9,14 +19,41 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+MODEL_DIR = Path.home() / ".faceprov" / "models"
+_ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
+_MODELS = {
+    "detector": (
+        "face_detection_yunet_2023mar.onnx",
+        f"{_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+    ),
+    "recognizer": (
+        "face_recognition_sface_2021dec.onnx",
+        f"{_ZOO}/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+    ),
+}
+
+DETECTOR_VERSION = "opencv/yunet-2023mar"
+ENCODER_VERSION = "opencv/sface-2021dec"
+
+
+def _ensure_model(kind: str) -> str:
+    name, url = _MODELS[kind]
+    dest = MODEL_DIR / name
+    if not dest.exists() or dest.stat().st_size < 1024:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"[faceprov] downloading {name} ...")
+        urllib.request.urlretrieve(url, dest)  # noqa: S310
+    return str(dest)
+
 
 @dataclass
 class Face:
-    bbox: tuple[float, float, float, float]      # x1, y1, x2, y2 (pixels)
-    bbox_norm: tuple[float, float, float, float] # x1, y1, x2, y2 in [0,1]
+    bbox: tuple[float, float, float, float]       # x1, y1, x2, y2 (pixels)
+    bbox_norm: tuple[float, float, float, float]  # x1, y1, x2, y2 in [0,1]
     det_score: float
-    embedding: np.ndarray                        # L2-normalized, 512-d
+    embedding: np.ndarray                         # L2-normalized, 128-d
     landmarks: list[list[float]]
+    _row: np.ndarray | None = None                # raw YuNet row, for alignCrop
 
     @property
     def embedding_digest(self) -> str:
@@ -25,16 +62,19 @@ class Face:
 
 
 @lru_cache(maxsize=1)
-def _model():
-    from insightface.app import FaceAnalysis
+def _detector() -> "cv2.FaceDetectorYN":
+    return cv2.FaceDetectorYN.create(_ensure_model("detector"), "", (320, 320),
+                                     score_threshold=0.6, nms_threshold=0.3, top_k=5000)
 
-    app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection", "recognition"])
-    app.prepare(ctx_id=-1, det_size=(640, 640))  # ctx_id=-1 => CPU
-    return app
+
+@lru_cache(maxsize=1)
+def _recognizer() -> "cv2.FaceRecognizerSF":
+    return cv2.FaceRecognizerSF.create(_ensure_model("recognizer"), "")
 
 
 def _read_image(path: str | Path) -> np.ndarray:
-    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    data = np.fromfile(str(path), dtype=np.uint8)      # unicode-safe on Windows
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"could not read image: {path}")
     return img
@@ -43,10 +83,24 @@ def _read_image(path: str | Path) -> np.ndarray:
 def detect_and_encode(path: str | Path) -> list[Face]:
     img = _read_image(path)
     h, w = img.shape[:2]
+    det = _detector()
+    det.setInputSize((w, h))
+    _, raw = det.detect(img)
+    if raw is None:
+        return []
+
+    rec = _recognizer()
     out: list[Face] = []
-    for f in _model().get(img):
-        x1, y1, x2, y2 = [float(v) for v in f.bbox]
-        emb = np.asarray(f.normed_embedding, dtype=np.float32)
+    for row in raw:
+        x, y, bw, bh = [float(v) for v in row[:4]]
+        x1, y1, x2, y2 = x, y, x + bw, y + bh
+        score = float(row[-1])
+        try:
+            aligned = rec.alignCrop(img, row)
+            feat = rec.feature(aligned).flatten().astype(np.float32)
+        except cv2.error:
+            continue
+        feat = feat / (np.linalg.norm(feat) + 1e-9)
         out.append(
             Face(
                 bbox=(x1, y1, x2, y2),
@@ -54,9 +108,10 @@ def detect_and_encode(path: str | Path) -> list[Face]:
                     max(0.0, x1 / w), max(0.0, y1 / h),
                     min(1.0, x2 / w), min(1.0, y2 / h),
                 ),
-                det_score=float(f.det_score),
-                embedding=emb,
-                landmarks=[[float(a), float(b)] for a, b in np.asarray(f.kps)],
+                det_score=score,
+                embedding=feat,
+                landmarks=[[float(row[4 + 2 * i]), float(row[5 + 2 * i])] for i in range(5)],
+                _row=row,
             )
         )
     return out

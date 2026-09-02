@@ -44,7 +44,17 @@ class SearchOutcome:
     def best(self) -> CandidateResult | None:
         if not self.accepted:
             return None
-        return max(self.accepted, key=lambda c: c.best_cosine)
+        # prefer an accepted candidate that sits on a real social platform;
+        # among equals, the highest cosine wins.
+        return max(self.accepted, key=lambda c: (c.platform is not None, c.best_cosine))
+
+
+def _interleave(a: list, b: list) -> list:
+    out = []
+    for x, y in zip(a, b):
+        out += [x, y]
+    out += a[len(b):] if len(a) > len(b) else b[len(a):]
+    return out
 
 
 def _dedupe_specs(specs: list[CandidateSpec]) -> list[CandidateSpec]:
@@ -77,7 +87,8 @@ def run_search(
         query_image_url=probe_image_url,
     )
 
-    visual = [*lens_res.matches, *y_matches]
+    # interleave the two engines so a long Lens list can't starve Yandex of budget
+    visual = _interleave(lens_res.matches, y_matches)
 
     # ---- build the ordered candidate spec list ----
     specs: list[CandidateSpec] = []

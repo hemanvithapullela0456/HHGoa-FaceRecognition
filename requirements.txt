@@ -1,27 +1,24 @@
 # Face detection + recognition
-insightface==0.7.3
-onnxruntime==1.19.2
-numpy==1.26.4
-opencv-python-headless==4.10.0.84
+# OpenCV ships YuNet (detect) + SFace (recognize) as built-in ONNX models — no
+# compiler needed, unlike insightface/dlib. Models are auto-downloaded on first run.
+opencv-python>=4.9,<5
+numpy>=1.26,<3
 
-# Search + web
-google-search-results==2.4.2   # SerpApi client
-requests==2.32.3
-beautifulsoup4==4.12.3
-lxml==5.3.0
-
-# IPFS
-# (Pinata is plain HTTPS via requests)
+# Search + web  (Pinata / catbox / SerpApi are all plain HTTPS via requests)
+google-search-results>=2.4.2   # SerpApi client
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+lxml>=5.0
 
 # Blockchain
-web3==7.4.0
-py-solc-x==2.0.3
-eth-account==0.13.4
+web3>=7.0,<8
+eth-account>=0.13,<0.14
+py-solc-x>=2.0            # only used if contracts/AttestationRegistry.json is absent
 
 # CLI + config
-typer==0.12.5
-python-dotenv==1.0.1
-rich==13.9.4
+typer>=0.15,<1
+python-dotenv>=1.0,<2
+rich>=13.7
 
 # Dev
-pytest==8.3.3
+pytest>=8.0
