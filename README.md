@@ -19,6 +19,10 @@ face scan  ──▶  detect + encode  ──▶  web / social search  ──▶
    (CLI verify cmd)      (Ethereum Sepolia, event)   (pinned to IPFS)
 ```
 
+> **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** is the full technical record — every
+> module, the end-to-end data flow, every design decision and the alternatives
+> weighed against it, the bundle schema, the threat model, and the known limits.
+
 ---
 
 ## 1. Why this framing
