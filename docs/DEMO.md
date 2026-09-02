@@ -4,15 +4,15 @@ The task requires a plain screen recording of the pipeline working end to end:
 **face scan → social post found → blockchain upload/verification.** No editing needed.
 
 ## One-time before recording
-- [ ] `.env` filled: `SERPAPI_KEY`, `PINATA_JWT`, `DEPLOYER_PRIVATE_KEY` (Base Sepolia, funded via faucet)
+- [ ] `.env` filled: `SERPAPI_KEY`, `PINATA_JWT`, `DEPLOYER_PRIVATE_KEY` (Ethereum Sepolia, funded via faucet)
 - [ ] `python -m faceprov.cli deploy` → copy `ATTESTATION_REGISTRY_ADDRESS` into `.env`
-- [ ] Open `https://sepolia.basescan.org/address/<contract>` in a browser tab
+- [ ] Open `https://sepolia.etherscan.io/address/<contract>` in a browser tab
 - [ ] Have 3 probe images ready: two well-known public figures + one image of yourself
       (the expected `NO_MATCH_FOUND`)
 
 ## Record this sequence (~4–6 min, unedited)
 
-1. **Show the contract on Basescan** — deployed, 0 transactions so far.
+1. **Show the contract on Etherscan** — deployed, 0 transactions so far.
 2. **Run 1 — public figure A**
    ```
    python -m faceprov.cli run --image demo/figure_a.jpg
@@ -20,7 +20,7 @@ The task requires a plain screen recording of the pipeline working end to end:
    Narrate as it prints: face detected → path `A:entity` → entity name resolved →
    social profile found → candidate table with cosine scores → matched post →
    Merkle root + IPFS CID → on-chain attestation id + tx link.
-3. **Refresh Basescan** — show the new `Attested` transaction and decoded event args.
+3. **Refresh Etherscan** — show the new `Attested` transaction and decoded event args.
 4. **Open the IPFS bundle URL** — show the full evidence JSON, point at the `merkle.root`.
 5. **Re-verify**
    ```

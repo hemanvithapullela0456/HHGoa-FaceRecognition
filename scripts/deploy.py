@@ -9,7 +9,7 @@ from faceprov.config import Config        # noqa: E402
 
 if __name__ == "__main__":
     cfg = Config.load(require_chain=True, require_search=False)
-    info = Chain(cfg.rpc_url, cfg.deployer_key).deploy()
+    info = Chain.from_config(cfg, signer=True).deploy()
     print(f"deployed: {info['address']}")
     print(f"explorer: {info['explorer']}")
     print(f"\nadd to .env:\nATTESTATION_REGISTRY_ADDRESS={info['address']}")

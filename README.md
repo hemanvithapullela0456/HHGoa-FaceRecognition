@@ -16,7 +16,7 @@ face scan  ──▶  detect + encode  ──▶  web / social search  ──▶
                                                                               │
                                                                               ▼
    re-verify later  ◀──  on-chain attestation  ◀──  Merkle-rooted evidence bundle
-   (CLI verify cmd)      (Base Sepolia, event log)   (pinned to IPFS)
+   (CLI verify cmd)      (Ethereum Sepolia, event)   (pinned to IPFS)
 ```
 
 ---
@@ -108,7 +108,9 @@ The **Merkle root**, the bundle CID (IPFS), and a compact summary go on-chain. T
 bundle is pinned to IPFS so re-verification is public.
 
 ### Stage E — Blockchain attestation
-- **Chain:** Base Sepolia testnet (EVM, free faucet, fast finality, real explorer).
+- **Chain:** Ethereum Sepolia testnet (chain id 11155111) by default — the chain is
+  fully configured by `RPC_URL` / `CHAIN_ID` / `EXPLORER_URL`, so any EVM testnet
+  (Base Sepolia, etc.) works with no code change.
 - **Contract:** `AttestationRegistry.sol` — `attest(bytes32 merkleRoot, string cid,
   bytes32 probeHash, string matchUrl)` emits `Attested(id, attester, merkleRoot, cid,
   probeHash, matchUrl, timestamp)` and stores a struct keyed by autoincrement id.
@@ -144,7 +146,7 @@ src/faceprov/
 contracts/
   AttestationRegistry.sol
 scripts/
-  deploy.py          compile (py-solc-x) + deploy to Base Sepolia
+  deploy.py          compile (py-solc-x) + deploy to the configured testnet
 eval/
   recall_study.py    30-identity recall benchmark
   identities.csv     15 public figures + 15 consenting private individuals
@@ -157,8 +159,8 @@ tests/
 
 ### Prerequisites
 - Python 3.12
-- API keys (all free tier): **SerpApi**, **Pinata**, a funded **Base Sepolia** key
-  (Coinbase / Alchemy faucet)
+- API keys (all free tier): **SerpApi**, **Pinata**, a funded **Ethereum Sepolia** key
+  (Google Cloud Web3 / Alchemy / QuickNode faucet)
 
 ### Setup
 ```bash
@@ -221,7 +223,7 @@ asymmetry rather than hide it.)_
 - **Yandex via SerpApi caps at ~4 source pages** and needs a public image URL.
 - **Deepfake robustness is out of scope** — a good synthetic face of a real person can
   pass ArcFace. This tool records provenance, it is not a liveness/AIGC detector.
-- **Base Sepolia is a testnet** — records are real and explorer-visible but not
+- **Sepolia is a testnet** — records are real and explorer-visible but not
   economically secured like mainnet.
 - **No website** — CLI + screen recording only, per the task.
 
@@ -229,9 +231,13 @@ asymmetry rather than hide it.)_
 
 ## 7. Blockchain used
 
-**Base Sepolia** (Ethereum L2 testnet, chain id 84532). Contract:
-`AttestationRegistry.sol`, deployed address in `deployments.json`. Explorer:
-`https://sepolia.basescan.org/address/<addr>`.
+**Ethereum Sepolia** (public testnet, chain id 11155111) by default. Contract:
+`AttestationRegistry.sol`, deployed address + ABI + deploy tx in `deployments.json`.
+Explorer: `https://sepolia.etherscan.io/address/<addr>`.
+
+The chain is not hard-coded — set `RPC_URL` / `CHAIN_ID` / `EXPLORER_URL` in `.env`
+to deploy the same contract to Base Sepolia, Optimism Sepolia, a local Anvil node,
+or any other EVM chain.
 
 ---
 

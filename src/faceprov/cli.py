@@ -16,12 +16,12 @@ console = Console()
 
 @app.command()
 def deploy():
-    """Compile AttestationRegistry.sol and deploy it to Base Sepolia."""
+    """Compile AttestationRegistry.sol and deploy it to the configured EVM testnet."""
     from .chain import Chain
 
     cfg = Config.load(require_chain=True, require_search=False)
-    console.print("[bold]Compiling + deploying to Base Sepolia...[/bold]")
-    chain = Chain(cfg.rpc_url, cfg.deployer_key)
+    console.print(f"[bold]Compiling + deploying (chain id {cfg.chain_id})...[/bold]")
+    chain = Chain.from_config(cfg, signer=True)
     info = chain.deploy()
     console.print(Panel.fit(
         f"address:  [green]{info['address']}[/green]\n"

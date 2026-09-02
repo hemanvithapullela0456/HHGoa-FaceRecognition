@@ -120,7 +120,7 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
 
     # ---- Stage E ----
     if attest and cfg.registry_address and cfg.deployer_key:
-        chain = Chain(cfg.rpc_url, cfg.deployer_key)
+        chain = Chain.from_config(cfg, signer=True)
         att = chain.attest(
             cfg.registry_address,
             merkle_root=bundle.root(),
@@ -135,7 +135,7 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
 
 def reverify(attestation_id: int, cfg: Config) -> dict:
     """Stage F — pull the on-chain record, recompute the root, re-hash the sources."""
-    chain = Chain(cfg.rpc_url)
+    chain = Chain.from_config(cfg)
     onchain = chain.get(cfg.registry_address, attestation_id)
 
     pinata = Pinata(cfg.pinata_jwt, cfg.pinata_gateway)
@@ -198,7 +198,7 @@ def tamper_demo(attestation_id: int, cfg: Config, *, field_path: str | None = No
     Demonstrates tamper-evidence without touching the chain: the on-chain root is
     immutable, so any edit to the pinned evidence makes the recomputed root diverge.
     """
-    chain = Chain(cfg.rpc_url)
+    chain = Chain.from_config(cfg)
     onchain = chain.get(cfg.registry_address, attestation_id)
     pinata = Pinata(cfg.pinata_jwt, cfg.pinata_gateway)
     doc = pinata.fetch_json(onchain["cid"])
