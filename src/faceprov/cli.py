@@ -120,5 +120,30 @@ def verify(id: int = typer.Option(..., "--id", help="Attestation id to re-verify
     console.print(tbl)
 
 
+@app.command()
+def tamper(
+    id: int = typer.Option(..., "--id", help="Attestation id whose bundle to tamper with."),
+    field: str = typer.Option("", "--field", help="Dotted path, e.g. candidates.0.best_cosine"),
+    value: str = typer.Option("", "--value", help="New value for --field"),
+):
+    """Demo tamper-evidence: edit one field of the attested bundle, show the root break."""
+    from .pipeline import tamper_demo
+
+    cfg = Config.load(require_chain=False, require_search=True)
+    if not cfg.registry_address and DEPLOYMENTS_FILE.exists():
+        object.__setattr__(cfg, "registry_address", json.loads(DEPLOYMENTS_FILE.read_text())["address"])
+
+    res = tamper_demo(id, cfg, field_path=field or None, value=(value or None))
+    console.print(Panel.fit(
+        f"on-chain root:          [yellow]{res['onchain_root']}[/yellow]\n"
+        f"original recomputed:    {res['original_recomputed_root']}  "
+        f"{'[green]✓ matches[/green]' if res['original_matches_chain'] else '[red]✗[/red]'}\n\n"
+        f"tampered field:         [red]{res['tampered_field']} = {res['tampered_value']}[/red]\n"
+        f"tampered root:          {res['tampered_root']}  "
+        f"{'[red]✗ DOES NOT MATCH — tamper detected[/red]' if not res['tampered_matches_chain'] else '[green]✓[/green]'}",
+        title="tamper-evidence demo",
+    ))
+
+
 if __name__ == "__main__":
     app()

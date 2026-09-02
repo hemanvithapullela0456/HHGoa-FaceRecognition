@@ -1,5 +1,11 @@
 """Merkle / bundle tests — pure, no API keys or network."""
-from faceprov.evidence import EvidenceBundle, merkle_proof, merkle_root, keccak
+from faceprov.evidence import (
+    EvidenceBundle,
+    keccak,
+    merkle_proof,
+    merkle_root,
+    set_leaf_path,
+)
 
 
 def _bundle() -> EvidenceBundle:
@@ -50,3 +56,22 @@ def test_roundtrip_json():
     b = _bundle()
     doc = b.to_json()
     assert EvidenceBundle.from_json(doc).root() == b.root()
+
+
+def test_tamper_breaks_root():
+    b = _bundle()
+    doc = b.to_json()
+    onchain_root = b.root()
+
+    set_leaf_path(doc, "candidates.0.cosine", 0.99)
+    tampered_root = EvidenceBundle.from_json(doc).root()
+
+    assert tampered_root != onchain_root
+
+
+def test_set_leaf_path_keeps_type():
+    doc = {"a": {"n": 1, "b": True}, "lst": [{"x": 0.1}]}
+    set_leaf_path(doc, "a.n", "5")
+    set_leaf_path(doc, "a.b", "false")
+    set_leaf_path(doc, "lst.0.x", "0.9")
+    assert doc == {"a": {"n": 5, "b": False}, "lst": [{"x": 0.9}]}

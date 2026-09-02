@@ -70,6 +70,24 @@ def merkle_proof(leaves: list[bytes], index: int) -> list[str]:
     return proof
 
 
+def set_leaf_path(doc: dict, dotted: str, value: Any) -> None:
+    """Set a nested value by a path like 'candidates.0.best_cosine'; keeps the old type."""
+    cur: Any = doc
+    parts = dotted.split(".")
+    for p in parts[:-1]:
+        cur = cur[int(p)] if isinstance(cur, list) else cur[p]
+    last = parts[-1]
+    if isinstance(cur, list):
+        cur[int(last)] = value
+        return
+    old = cur.get(last)
+    if isinstance(old, bool):
+        value = str(value).lower() in {"1", "true", "yes"}
+    elif isinstance(old, (int, float)):
+        value = type(old)(value)
+    cur[last] = value
+
+
 @dataclass
 class EvidenceBundle:
     probe: dict = field(default_factory=dict)

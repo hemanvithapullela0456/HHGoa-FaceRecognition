@@ -31,8 +31,12 @@ The task requires a plain screen recording of the pipeline working end to end:
    Shows the pipeline is not hardcoded.
 7. **Run 3 — your own face** — show a clean `NO_MATCH_FOUND` with the rejected
    candidates and their sub-threshold scores. Honest failure, no crash.
-8. **(Optional) tamper demo** — hand-edit one field in a local copy of the bundle,
-   re-run the Merkle computation, show the root no longer matches the chain.
+8. **Tamper demo**
+   ```
+   python -m faceprov.cli tamper --id 0
+   ```
+   Shows: original bundle root matches the chain; after editing one field the
+   recomputed root no longer matches → tamper detected.
 
 ## Upload
 YouTube (unlisted) / Google Drive / Loom — paste the link in the submission form

@@ -66,6 +66,12 @@ Two recall sources, unioned, because they fail differently:
 The probe is pinned to IPFS first and the gateway URL is handed to SerpApi (Yandex
 accepts URLs only), which doubles as the start of our provenance chain.
 
+**Candidate image sourcing.** Logged-out social pages return almost nothing to a
+scraper, so the **SerpApi thumbnail** (the engine's own cached copy of the match) is
+the primary, always-fetchable candidate image. Each source page is still harvested
+best-effort for its HTML hash, `og:image`, author handle, and caption — and the
+`og:image` is verified as a second candidate when present.
+
 **Entity router — two paths, logged and surfaced in CLI output:**
 
 - **Path A · entity resolved.** Lens returns `knowledge_graph` → a name. We run a
@@ -178,6 +184,15 @@ CID, and the on-chain attestation id + explorer link.
 ```bash
 python -m faceprov.cli verify --id 7
 ```
+
+### Demonstrate tamper-evidence
+```bash
+python -m faceprov.cli tamper --id 7
+# or target a specific field:
+python -m faceprov.cli tamper --id 7 --field candidates.0.best_cosine --value 0.99
+```
+Fetches the attested bundle, edits one field, recomputes the Merkle root, and shows
+it no longer matches the immutable on-chain root.
 
 ---
 

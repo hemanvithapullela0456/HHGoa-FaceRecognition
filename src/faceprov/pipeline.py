@@ -10,7 +10,7 @@ from pathlib import Path
 from . import __version__
 from .chain import Chain
 from .config import Config
-from .evidence import EvidenceBundle, sha256_bytes
+from .evidence import EvidenceBundle, set_leaf_path, sha256_bytes
 from .face import cosine, detect_and_encode, probe_face
 from .search.ipfs import Pinata
 from .search.router import run_search
@@ -54,6 +54,7 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
     bundle.search = {
         "path_taken": search.path_taken,
         "entity_name": search.entity_name,
+        "entity_type": search.entity_type,
         "query_image_url": probe_url,
         "lens_meta": search.lens_meta,
         "yandex_meta": search.yandex_meta,
@@ -70,10 +71,14 @@ def run_pipeline(image_path: str, cfg: Config, *, attest: bool = True) -> dict:
             "matched": True,
             "source_url": best.source_url,
             "image_url": best.image_url,
+            "image_origin": best.image_origin,
             "image_sha256": best.image_sha256,
             "page_sha256": best.page_sha256,
             "cosine": best.best_cosine,
             "engine": best.engine,
+            "platform": best.platform,
+            "author_handle": best.author_handle,
+            "caption": best.caption,
             "note": best.note,
         }
     else:
@@ -185,3 +190,42 @@ def reverify(attestation_id: int, cfg: Config) -> dict:
 
     passed = all(c.get("ok", True) and c.get("image_ok", True) is not False for c in checks)
     return {"attestation_id": attestation_id, "onchain": onchain, "verdict": "PASS" if passed else "FAIL", "checks": checks}
+
+
+def tamper_demo(attestation_id: int, cfg: Config, *, field_path: str | None = None, value=None) -> dict:
+    """Fetch the attested bundle, mutate one field, and show the Merkle root break.
+
+    Demonstrates tamper-evidence without touching the chain: the on-chain root is
+    immutable, so any edit to the pinned evidence makes the recomputed root diverge.
+    """
+    chain = Chain(cfg.rpc_url)
+    onchain = chain.get(cfg.registry_address, attestation_id)
+    pinata = Pinata(cfg.pinata_jwt, cfg.pinata_gateway)
+    doc = pinata.fetch_json(onchain["cid"])
+
+    original = EvidenceBundle.from_json(doc)
+    original_root = original.root()
+
+    tampered_doc = json.loads(json.dumps(doc))  # deep copy
+    if field_path is None:
+        if doc.get("match", {}).get("matched"):
+            field_path, value = "match.source_url", (doc["match"]["source_url"] + "?evil=1")
+        elif doc.get("candidates"):
+            field_path = "candidates.0.best_cosine"
+            value = round(float(doc["candidates"][0].get("best_cosine", 0.0)) + 0.05, 4)
+        else:
+            field_path, value = "search.entity_name", "Someone Else"
+    set_leaf_path(tampered_doc, field_path, value)
+
+    tampered_root = EvidenceBundle.from_json(tampered_doc).root()
+
+    return {
+        "attestation_id": attestation_id,
+        "onchain_root": onchain["merkle_root"],
+        "original_recomputed_root": original_root,
+        "tampered_field": field_path,
+        "tampered_value": value,
+        "tampered_root": tampered_root,
+        "original_matches_chain": original_root.lower() == onchain["merkle_root"].lower(),
+        "tampered_matches_chain": tampered_root.lower() == onchain["merkle_root"].lower(),
+    }
