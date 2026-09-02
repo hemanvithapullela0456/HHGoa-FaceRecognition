@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faceprov"
+version = "0.1.0"
+description = "Face-anchored provenance for image verification"
+requires-python = ">=3.11"
+readme = "README.md"
+
+[project.scripts]
+faceprov = "faceprov.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

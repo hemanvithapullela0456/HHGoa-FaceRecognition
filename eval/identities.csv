@@ -1,0 +1,31 @@
+id,group,label,probe_image,notes
+1,public,,eval/probes/public_01.jpg,
+2,public,,eval/probes/public_02.jpg,
+3,public,,eval/probes/public_03.jpg,
+4,public,,eval/probes/public_04.jpg,
+5,public,,eval/probes/public_05.jpg,
+6,public,,eval/probes/public_06.jpg,
+7,public,,eval/probes/public_07.jpg,
+8,public,,eval/probes/public_08.jpg,
+9,public,,eval/probes/public_09.jpg,
+10,public,,eval/probes/public_10.jpg,
+11,public,,eval/probes/public_11.jpg,
+12,public,,eval/probes/public_12.jpg,
+13,public,,eval/probes/public_13.jpg,
+14,public,,eval/probes/public_14.jpg,
+15,public,,eval/probes/public_15.jpg,
+16,private,,eval/probes/private_01.jpg,consenting participant
+17,private,,eval/probes/private_02.jpg,consenting participant
+18,private,,eval/probes/private_03.jpg,consenting participant
+19,private,,eval/probes/private_04.jpg,consenting participant
+20,private,,eval/probes/private_05.jpg,consenting participant
+21,private,,eval/probes/private_06.jpg,consenting participant
+22,private,,eval/probes/private_07.jpg,consenting participant
+23,private,,eval/probes/private_08.jpg,consenting participant
+24,private,,eval/probes/private_09.jpg,consenting participant
+25,private,,eval/probes/private_10.jpg,consenting participant
+26,private,,eval/probes/private_11.jpg,consenting participant
+27,private,,eval/probes/private_12.jpg,consenting participant
+28,private,,eval/probes/private_13.jpg,consenting participant
+29,private,,eval/probes/private_14.jpg,consenting participant
+30,private,,eval/probes/private_15.jpg,consenting participant

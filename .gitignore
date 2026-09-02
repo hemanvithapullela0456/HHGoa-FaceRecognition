@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+deployments.json
+*.log
+.pytest_cache/
+data/
+out/
+demo/
+eval/probes/*
+!eval/probes/.gitkeep
+eval/results.json
+*.egg-info/
+.DS_Store
