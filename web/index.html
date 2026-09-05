@@ -315,17 +315,19 @@ $("#btnverify").addEventListener("click", async () => {
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || "verify failed");
     const v = $("#verdict2");
-    v.className = "verdict " + (j.verdict === "PASS" ? "match" : "nomatch");
+    // PASS_WITH_WARNINGS is a pass: pages drift for innocent reasons and saying so
+    // is the whole point of grading drift instead of failing on any byte change.
+    v.className = "verdict " + (j.verdict === "FAIL" ? "nomatch" : "match");
     v.textContent = "Re-verification: " + j.verdict;
     const tb = $("#checks tbody");
     for (const c of j.checks) {
-      const ok = c.ok ?? c.image_ok ?? true;
+      const level = c.level ?? ((c.ok ?? true) ? "ok" : "fail");
       const tr = document.createElement("tr");
       tr.innerHTML = `<td>${c.check}</td>` +
-        `<td><span class="pill ${ok === false ? "no" : "yes"}">${ok === false ? "FAIL" : (ok === null ? "skip" : "ok")}</span></td>` +
+        `<td><span class="pill ${level === "fail" ? "no" : "yes"}">${level}</span></td>` +
         `<td class="mono"></td>`;
       tr.lastElementChild.textContent = JSON.stringify(Object.fromEntries(
-        Object.entries(c).filter(([k]) => k !== "check"))).slice(0, 160);
+        Object.entries(c).filter(([k]) => k !== "check" && k !== "level" && k !== "ok"))).slice(0, 160);
       tb.appendChild(tr);
     }
   } catch (e) {

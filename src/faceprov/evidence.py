@@ -21,7 +21,12 @@ def sha256_bytes(b: bytes) -> str:
     return "0x" + hashlib.sha256(b).hexdigest()
 
 
-def _canon(obj: Any) -> bytes:
+def canonical_json(obj: Any) -> bytes:
+    """The one canonicalization used everywhere a digest is taken.
+
+    Sorted keys, no whitespace. Every hash in the bundle goes through this, so a
+    third party recomputing a digest cannot land on a different byte string.
+    """
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -31,7 +36,7 @@ def keccak(b: bytes) -> bytes:
 
 def _leaf(section_name: str, payload: Any) -> bytes:
     # domain-separate the leaf by section name to prevent cross-section collisions
-    return keccak(b"faceprov-leaf:" + section_name.encode() + b":" + _canon(payload))
+    return keccak(b"faceprov-leaf:" + section_name.encode() + b":" + canonical_json(payload))
 
 
 def merkle_root(leaves: list[bytes]) -> bytes:
@@ -94,6 +99,7 @@ class EvidenceBundle:
     search: dict = field(default_factory=dict)
     candidates: list[dict] = field(default_factory=list)
     match: dict = field(default_factory=dict)
+    timeline: dict = field(default_factory=dict)
     run: dict = field(default_factory=dict)
 
     # ---- assembly ----
@@ -106,6 +112,11 @@ class EvidenceBundle:
         for i, c in enumerate(self.candidates):
             sections.append((f"candidate[{i}]", c))
         sections.append(("match", self.match))
+        # `timeline` (schema v2) is omitted when empty, so a v1 bundle - and every
+        # attestation already on chain - keeps exactly the leaf order it was sealed
+        # with and still recomputes to its original root.
+        if self.timeline:
+            sections.append(("timeline", self.timeline))
         sections.append(("run", self.run))
         return sections
 
@@ -117,7 +128,9 @@ class EvidenceBundle:
 
     def to_json(self) -> dict:
         return {
-            "schema": "faceprov/evidence-bundle/v1",
+            # v2 adds the optional `timeline` leaf; with no timeline the leaf set is
+            # identical to v1. The schema string sits outside the hashed sections.
+            "schema": "faceprov/evidence-bundle/v2",
             "faceprov_version": __version__,
             "merkle": {
                 "algo": "keccak256",
@@ -129,6 +142,7 @@ class EvidenceBundle:
             "search": self.search,
             "candidates": self.candidates,
             "match": self.match,
+            "timeline": self.timeline,
             "run": self.run,
         }
 
@@ -139,5 +153,6 @@ class EvidenceBundle:
             search=doc.get("search", {}),
             candidates=doc.get("candidates", []),
             match=doc.get("match", {}),
+            timeline=doc.get("timeline", {}),
             run=doc.get("run", {}),
         )

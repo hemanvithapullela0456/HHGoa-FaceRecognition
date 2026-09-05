@@ -21,14 +21,18 @@ import numpy as np
 
 MODEL_DIR = Path.home() / ".faceprov" / "models"
 _ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
+# (filename, url, minimum plausible size) - the size is what makes a truncated
+# download detectable instead of being cached and failing later in the ONNX parser.
 _MODELS = {
     "detector": (
         "face_detection_yunet_2023mar.onnx",
         f"{_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        200_000,          # ~232 KB
     ),
     "recognizer": (
         "face_recognition_sface_2021dec.onnx",
         f"{_ZOO}/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+        35_000_000,       # ~38.7 MB
     ),
 }
 
@@ -37,12 +41,27 @@ ENCODER_VERSION = "opencv/sface-2021dec"
 
 
 def _ensure_model(kind: str) -> str:
-    name, url = _MODELS[kind]
+    name, url, min_bytes = _MODELS[kind]
     dest = MODEL_DIR / name
-    if not dest.exists() or dest.stat().st_size < 1024:
+    # Download to a sidecar and rename only once it is complete. urlretrieve writes
+    # straight to the destination, so an interrupted download (a timeout, a dropped
+    # connection) leaves a truncated file that is large enough to pass a size check
+    # and poisons the cache: every later run then fails inside the ONNX parser with
+    # no hint that the real problem is a half-written file.
+    if not dest.exists() or dest.stat().st_size < min_bytes:
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         print(f"[faceprov] downloading {name} ...")
-        urllib.request.urlretrieve(url, dest)  # noqa: S310
+        part = dest.with_suffix(".part")
+        req = urllib.request.Request(url, headers={"User-Agent": "faceprov/0.1"})
+        with urllib.request.urlopen(req, timeout=120) as r, open(part, "wb") as f:  # noqa: S310
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+        if part.stat().st_size < min_bytes:
+            part.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"{name} download truncated ({part.stat().st_size} bytes); retry"
+            )
+        part.replace(dest)
     return str(dest)
 
 

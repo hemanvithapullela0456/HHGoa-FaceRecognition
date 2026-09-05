@@ -25,6 +25,17 @@ console = Console()
 _YES = "[green]yes[/green]"
 _NO = "[red]no[/red]"
 
+# Re-verification grades drift instead of calling everything a failure; see
+# faceprov.pipeline._check for what each level means.
+_LEVEL_MARK = {
+    "ok": "[green]ok[/green]",
+    "info": "[dim]info[/dim]",
+    "warn": "[yellow]warn[/yellow]",
+    "fail": "[red]FAIL[/red]",
+    "skip": "[dim]skip[/dim]",
+}
+_VERDICT_COLOR = {"PASS": "green", "PASS_WITH_WARNINGS": "yellow", "FAIL": "red"}
+
 
 @app.command()
 def deploy():
@@ -56,10 +67,20 @@ def run(
     cfg = Config.load(require_chain=not no_attest, require_search=True)
     res = run_pipeline(image, cfg, attest=not no_attest)
 
+    if not res.get("probe_publicly_fetchable", True):
+        console.print(Panel.fit(
+            "No image host would serve the probe, so Google Lens and Yandex both\n"
+            "fetched a dead URL. Zero candidates here says nothing about the person\n"
+            "in the image - re-run when a host is reachable.",
+            title="[red]search did not actually run[/red]",
+        ))
+
+    first_seen = res.get("earliest_known_appearance")
     console.print(Panel.fit(
         f"path taken:   [bold cyan]{res['path_taken']}[/bold cyan]\n"
         f"entity:       {res.get('entity_name') or '—'}\n"
-        f"matched:      {'[green]YES[/green]' if res['matched'] else '[red]NO_MATCH_FOUND[/red]'}",
+        f"matched:      {'[green]YES[/green]' if res['matched'] else '[red]NO_MATCH_FOUND[/red]'}\n"
+        f"first seen:   {(first_seen[:10] + '  [dim](web.archive.org)[/dim]') if first_seen else '[dim]no archived capture[/dim]'}",
         title="search",
     ))
 
@@ -140,7 +161,7 @@ def verify(id: int = typer.Option(..., "--id", help="Attestation id to re-verify
         object.__setattr__(cfg, "registry_address", addr)
 
     res = reverify(id, cfg)
-    color = "green" if res["verdict"] == "PASS" else "red"
+    color = _VERDICT_COLOR.get(res["verdict"], "red")
     console.print(Panel.fit(
         f"attestation:  {id}\n"
         f"attester:     {res['onchain']['attester']}\n"
@@ -150,10 +171,14 @@ def verify(id: int = typer.Option(..., "--id", help="Attestation id to re-verify
     ))
     tbl = Table("check", "result", "detail")
     for c in res["checks"]:
-        ok = c.get("ok", c.get("image_ok", True))
-        mark = _YES if ok else ("[yellow]skip[/yellow]" if ok is None else _NO)
-        tbl.add_row(str(c.get("check")), mark, json.dumps({k: v for k, v in c.items() if k != "check"})[:80])
+        mark = _LEVEL_MARK.get(c.get("level", ""), _YES if c.get("ok", True) else _NO)
+        detail = {k: v for k, v in c.items() if k not in {"check", "level", "ok"}}
+        tbl.add_row(str(c.get("check")), mark, json.dumps(detail)[:96])
     console.print(tbl)
+    console.print(
+        "[dim]ok = recomputed exactly · info = expected to change (CDN/ad churn) · "
+        "warn = worth a look · FAIL = the sealed claim no longer holds[/dim]"
+    )
 
 
 @app.command()

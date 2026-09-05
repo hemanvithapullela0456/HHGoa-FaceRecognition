@@ -9,6 +9,21 @@ import requests
 PIN_FILE = "https://api.pinata.cloud/pinning/pinFileToIPFS"
 PIN_JSON = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 
+# Public gateways tried, in order, when the configured one does not answer. A CID
+# addresses content, not a server, so every one of these returns identical bytes or
+# nothing — falling through them cannot change what is verified, only whether the
+# verification completes at all.
+# Ordered by observed reliability, not popularity: on the machine this was last run
+# from, the well-known gateways (pinata's public one, ipfs.io, dweb.link, w3s.link)
+# all timed out at TCP-connect while filebase answered in under two seconds.
+PUBLIC_GATEWAYS = (
+    "https://ipfs.filebase.io",
+    "https://ipfs.io",
+    "https://dweb.link",
+    "https://w3s.link",
+    "https://nftstorage.link",
+)
+
 
 class Pinata:
     def __init__(self, jwt: str, gateway: str):
@@ -42,7 +57,40 @@ class Pinata:
     def gateway_url(self, cid: str) -> str:
         return f"{self.gateway}/ipfs/{cid}"
 
-    def fetch_json(self, cid: str) -> dict:
-        r = requests.get(self.gateway_url(cid), timeout=60)
-        r.raise_for_status()
-        return r.json()
+    def fetch_bytes(self, cid: str, *, timeout: int = 20) -> bytes:
+        """Fetch pinned content by CID, falling through gateways until one answers."""
+        errors: list[str] = []
+        for base in (self.gateway, *PUBLIC_GATEWAYS):
+            url = f"{base.rstrip('/')}/ipfs/{cid}"
+            try:
+                r = requests.get(url, timeout=timeout)
+                r.raise_for_status()
+                return r.content
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{base}: {type(e).__name__}")
+        raise RuntimeError(
+            f"could not fetch {cid} from any gateway - tried {len(errors)}: "
+            + "; ".join(errors)
+        )
+
+    def fetch_json(self, cid: str, *, timeout: int = 20) -> dict:
+        """Fetch a pinned JSON document, falling through gateways until one answers.
+
+        The configured gateway is tried first (it is the one recorded in the bundle
+        and, on a paid plan, the fast one). Public gateways rate-limit aggressively,
+        so a timeout on any single one says nothing about whether the evidence is
+        still retrievable.
+        """
+        errors: list[str] = []
+        for base in (self.gateway, *PUBLIC_GATEWAYS):
+            url = f"{base.rstrip('/')}/ipfs/{cid}"
+            try:
+                r = requests.get(url, timeout=timeout)
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{base}: {type(e).__name__}")
+        raise RuntimeError(
+            f"could not fetch {cid} from any gateway - tried {len(errors)}: "
+            + "; ".join(errors)
+        )

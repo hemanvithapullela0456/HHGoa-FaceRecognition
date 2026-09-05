@@ -3,17 +3,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import requests
+
 from . import __version__
 from . import face as face_mod
 from .chain import Chain
 from .config import Config
+from .drift import check as _check
+from .drift import recheck_candidate, verdict_of
 from .evidence import EvidenceBundle, set_leaf_path, sha256_bytes
 from .face import cosine, detect_and_encode, probe_face
+from .search import wayback
 from .search.imagehost import host_probe
 from .search.ipfs import Pinata
 from .search.router import run_search
@@ -50,9 +56,17 @@ def run_pipeline(
     p("pin_probe", f"probe CID {probe_cid}")
 
     # ---- host the probe where search-engine crawlers can fetch it ----
-    query_url, query_host = host_probe(probe_bytes, fallback_url=ipfs_url,
-                                       filename=f"probe-{img_path.stem}.jpg")
-    p("host_probe", f"probe hosted for search via {query_host}")
+    hosting = host_probe(probe_bytes, fallback_url=ipfs_url,
+                         filename=f"probe-{img_path.stem}.jpg")
+    query_url = hosting.url
+    if hosting.verified:
+        p("host_probe", f"probe hosted for search via {hosting.host} (fetch verified)")
+    else:
+        # Every engine is about to fetch a URL that does not serve an image, so the
+        # search cannot find anything. Say so now rather than letting the run end in
+        # a NO_MATCH that looks like a finding.
+        p("host_probe", f"WARNING: probe URL is not publicly fetchable ({hosting.host}) - "
+                        "search results will be empty and mean nothing")
 
     # ---- Stage B ----
     p("search", "reverse-image search: Google Lens + Yandex Images")
@@ -63,6 +77,21 @@ def run_pipeline(
     )
     p("search", f"path {search.path_taken} - {len(search.candidates)} candidates, "
                 f"{len(search.accepted)} above threshold")
+
+    # ---- Stage B2: earliest-appearance dating ----
+    # "When did this image first appear online?" is the question that actually settles
+    # a miscaptioning dispute, and it is answered by a third party we do not control.
+    timeline: dict = {}
+    if cfg.wayback_enabled:
+        p("timeline", "dating source pages against the Internet Archive")
+        urls = ([search.best.source_url] if search.best else []) + \
+               [c.source_url for c in search.candidates]
+        timeline = wayback.build_timeline(
+            urls, max_urls=cfg.wayback_max_urls, timeout=cfg.wayback_timeout,
+        )
+        first = timeline.get("earliest_known_appearance")
+        p("timeline", f"earliest archived appearance: {first[:10]}" if first
+                      else "no archived capture found for any source page")
 
     # ---- Stage D: bundle ----
     bundle = EvidenceBundle()
@@ -82,7 +111,11 @@ def run_pipeline(
         "entity_name": search.entity_name,
         "entity_type": search.entity_type,
         "query_image_url": query_url,
-        "query_image_host": query_host,
+        "query_image_host": hosting.host,
+        # whether an engine could actually fetch the probe. A search leaf without this
+        # cannot be told apart from one where the engines saw a 404.
+        "query_image_verified": hosting.verified,
+        "query_image_host_attempts": hosting.attempts,
         "lens_meta": search.lens_meta,
         "yandex_meta": search.yandex_meta,
         "social_profiles": search.social_profiles,
@@ -101,6 +134,7 @@ def run_pipeline(
             "image_origin": best.image_origin,
             "image_sha256": best.image_sha256,
             "page_sha256": best.page_sha256,
+            "page": best.page,
             "cosine": best.best_cosine,
             "engine": best.engine,
             "platform": best.platform,
@@ -108,22 +142,35 @@ def run_pipeline(
             "caption": best.caption,
             "note": best.note,
         }
+    elif not hosting.verified and not search.candidates:
+        # Distinguish "we looked and found nothing" from "we were never able to look".
+        bundle.match = {
+            "matched": False,
+            "reason": "probe image was not publicly fetchable, so no engine could see "
+                      "it - this is an infrastructure failure, not a finding about the "
+                      "person in the image",
+            "probe_publicly_fetchable": False,
+            "rejected": [],
+        }
     else:
         bundle.match = {
             "matched": False,
             "reason": "no candidate cleared threshold",
+            "probe_publicly_fetchable": hosting.verified,
             "rejected": [
                 {"source_url": c.source_url, "cosine": c.best_cosine, "note": c.note}
                 for c in search.candidates
             ],
         }
 
+    bundle.timeline = timeline
     bundle.run = {
         "faceprov_version": __version__,
         "wall_clock_s": round(time.time() - t0, 2),
         "config_hash": hashlib.sha256(
             json.dumps(
-                {"threshold": cfg.match_threshold, "max_candidates": cfg.max_candidates},
+                {"threshold": cfg.match_threshold, "max_candidates": cfg.max_candidates,
+                 "wayback": cfg.wayback_enabled, "wayback_max_urls": cfg.wayback_max_urls},
                 sort_keys=True,
             ).encode()
         ).hexdigest(),
@@ -145,6 +192,10 @@ def run_pipeline(
         "bundle_url": pinata.gateway_url(bundle_cid),
         "candidates": [c.as_leaf() for c in search.candidates],
         "match": bundle.match,
+        "timeline": timeline,
+        "earliest_known_appearance": timeline.get("earliest_known_appearance"),
+        "probe_publicly_fetchable": hosting.verified,
+        "query_image_host": hosting.host,
     }
 
     # ---- Stage E ----
@@ -168,7 +219,15 @@ def run_pipeline(
 
 
 def reverify(attestation_id: int, cfg: Config) -> dict:
-    """Stage F - pull the on-chain record, recompute the root, re-hash the sources."""
+    """Stage F - pull the on-chain record, recompute the root, re-check the sources.
+
+    Drift is graded rather than treated as binary. A news or social page rewrites its
+    own bytes on every request (ad slots, CSRF tokens, session ids, view counters), so
+    a raw byte comparison flags essentially every page and the alarm stops carrying
+    information. What matters is whether the *claim* the page made about this image -
+    its canonical URL, its og:image, its author, its title - still holds. That is
+    graded `fail`; a body-text edit is `warn`; churning bytes are `info`.
+    """
     chain = Chain.from_config(cfg)
     onchain = chain.get(cfg.registry_address, attestation_id)
 
@@ -177,53 +236,99 @@ def reverify(attestation_id: int, cfg: Config) -> dict:
     bundle = EvidenceBundle.from_json(doc)
 
     recomputed_root = bundle.root()
-    checks: list[dict] = []
-
-    checks.append({
-        "check": "merkle_root",
-        "ok": recomputed_root.lower() == onchain["merkle_root"].lower(),
-        "onchain": onchain["merkle_root"],
-        "recomputed": recomputed_root,
-    })
-
-    # re-hash each candidate's image and page
-    import requests
+    root_ok = recomputed_root.lower() == onchain["merkle_root"].lower()
+    checks: list[dict] = [_check(
+        "merkle_root", "ok" if root_ok else "fail",
+        onchain=onchain["merkle_root"], recomputed=recomputed_root,
+    )]
 
     for i, c in enumerate(bundle.candidates):
-        entry: dict = {"check": f"candidate[{i}] source", "url": c.get("source_url")}
-        try:
-            img = requests.get(c["image_url"], timeout=20, headers={"User-Agent": "faceprov/0.1"}).content
-            now_sha = sha256_bytes(img)
-            entry["image_ok"] = now_sha == c.get("image_sha256")
-            entry["was"] = c.get("image_sha256")
-            entry["now"] = now_sha
-        except Exception as e:  # noqa: BLE001
-            entry["image_ok"] = None
-            entry["error"] = str(e)
-        checks.append(entry)
+        checks.extend(recheck_candidate(i, c))
 
-    # re-run face match on the winning candidate
+    # The Archive is the one baseline in this record that we do not control. A capture
+    # predating our run bounds the claim's age independently of anything we asserted.
+    timeline = doc.get("timeline") or {}
+    if timeline.get("earliest_known_appearance"):
+        checks.append(_check(
+            "earliest_appearance", "info",
+            first_seen=timeline["earliest_known_appearance"],
+            url=timeline.get("earliest_url"),
+            archived=f"{timeline.get('archived_count')}/{timeline.get('checked_count')} pages",
+        ))
+
     match = doc.get("match", {})
     if match.get("matched"):
-        try:
-            import tempfile
-            img = requests.get(match["image_url"], timeout=20, headers={"User-Agent": "faceprov/0.1"}).content
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-                tf.write(img)
-                tmp = tf.name
-            faces = detect_and_encode(tmp)
-            Path(tmp).unlink(missing_ok=True)
-            checks.append({
-                "check": "face_rematch",
-                "n_faces": len(faces),
-                "note": "recompute cosine against a fresh probe to fully close the loop",
-                "recorded_cosine": match.get("cosine"),
-            })
-        except Exception as e:  # noqa: BLE001
-            checks.append({"check": "face_rematch", "error": str(e)})
+        checks.append(_reverify_match_face(match, bundle, pinata))
 
-    passed = all(c.get("ok", True) and c.get("image_ok", True) is not False for c in checks)
-    return {"attestation_id": attestation_id, "onchain": onchain, "verdict": "PASS" if passed else "FAIL", "checks": checks}
+    return {"attestation_id": attestation_id, "onchain": onchain,
+            "verdict": verdict_of(checks), "checks": checks}
+
+
+def _reverify_match_face(match: dict, bundle: EvidenceBundle, pinata: Pinata) -> dict:
+    """Re-run SFace on the winning candidate and compare against the sealed probe.
+
+    The bundle records the probe's embedding *digest*, not the vector, so the honest
+    way to close the loop is to re-fetch the pinned probe image from IPFS, re-embed
+    it, and recompute the cosine. The probe is fetched **by CID** through the gateway
+    fallback rather than by the single URL recorded in the bundle: that URL names one
+    gateway, and one unreachable gateway must not silently skip the only check that
+    re-proves the match.
+    """
+    ua = {"User-Agent": "faceprov/0.1"}
+    try:
+        faces = _faces_from_url(match["image_url"], ua, timeout=20)
+        if not faces:
+            return _check("face_rematch", "warn", n_faces=0,
+                          note="no face detected in the candidate image now",
+                          recorded_cosine=match.get("cosine"))
+
+        probe = bundle.probe or {}
+        pfaces = None
+        if probe.get("image_cid"):
+            pfaces = _faces_from_bytes(pinata.fetch_bytes(probe["image_cid"]))
+        elif probe.get("image_ipfs_url"):
+            pfaces = _faces_from_url(probe["image_ipfs_url"], ua, timeout=30)
+        else:
+            return _check("face_rematch", "info", n_faces=len(faces),
+                          recorded_cosine=match.get("cosine"),
+                          note="probe image absent from bundle; face count only")
+
+        if not pfaces:
+            return _check("face_rematch", "info", n_faces=len(faces),
+                          recorded_cosine=match.get("cosine"),
+                          note="probe re-fetched but no face detected in it")
+
+        probe_vec = max(pfaces, key=lambda f: f.det_score).embedding
+        now_cos = round(max(cosine(probe_vec, f.embedding) for f in faces), 4)
+        recorded = match.get("cosine")
+        drift = abs(now_cos - recorded) if isinstance(recorded, (int, float)) else None
+        # The same two images through the same model must give the same score, so a
+        # real gap means the served image is not the one that was attested.
+        level = "ok" if (drift is not None and drift <= 0.02) else "warn"
+        return _check("face_rematch", level, n_faces=len(faces),
+                      recorded_cosine=recorded, recomputed_cosine=now_cos,
+                      drift=None if drift is None else round(drift, 4))
+    except Exception as e:  # noqa: BLE001
+        return _check("face_rematch", "skip", error=str(e))
+
+
+def _faces_from_url(url: str, ua: dict, *, timeout: int) -> list:
+    """Download an image and run detection on it."""
+    return _faces_from_bytes(requests.get(url, timeout=timeout, headers=ua).content)
+
+
+def _faces_from_bytes(img: bytes) -> list:
+    """Detect + encode from raw bytes, always cleaning up the temp file.
+
+    OpenCV's reader takes a path, so the bytes have to land on disk briefly.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+        tf.write(img)
+        tmp = tf.name
+    try:
+        return detect_and_encode(tmp)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def tamper_demo(attestation_id: int, cfg: Config, *, field_path: str | None = None, value=None) -> dict:

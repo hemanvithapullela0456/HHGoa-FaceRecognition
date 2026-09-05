@@ -15,6 +15,10 @@ face scan  ──▶  detect + encode  ──▶  web / social search  ──▶
                                            entity router)                accept/reject)
                                                                               │
                                                                               ▼
+                                                                   earliest-appearance
+                                                                    dating (Wayback)
+                                                                              │
+                                                                              ▼
    re-verify later  ◀──  on-chain attestation  ◀──  Merkle-rooted evidence bundle
    (CLI verify cmd)      (Ethereum Sepolia, event)   (pinned to IPFS)
 ```
@@ -73,10 +77,19 @@ Two recall sources, unioned, because they fail differently:
 **Probe hosting.** Reverse-image APIs fetch the probe by URL. It is pinned to IPFS
 for the tamper-evidence record, but public IPFS gateways are rate-limited and
 SerpApi's Yandex engine rejects them outright ("not publicly accessible"). So for
-the *query* the probe is also pushed to a plain image host (`catbox.moe`, no key)
-that both engines fetch reliably; the URL used is recorded in the evidence bundle.
-If that host is down the pipeline falls back to the IPFS gateway URL (Lens still
-works with it; Yandex recall drops).
+the *query* the probe is also pushed to a plain image host (no key required); the
+URL used is recorded in the evidence bundle. Hosts are tried in order
+(`uguu.se` → `catbox.moe` → `litterbox`) and then the IPFS gateway URL.
+
+**The upload is verified, not assumed** — this matters more than it sounds. catbox
+answers a rejected upload with `HTTP 200` and a well-formed URL that then serves
+`404` forever. Both engines fetch the dead link, return zero matches, and the run
+records a clean `NO_MATCH_FOUND`: an infrastructure failure wearing the costume of a
+finding. So the probe URL is fetched back and checked before any engine sees it, the
+result is sealed into the `search` leaf as `query_image_verified`, and a `NO_MATCH`
+under an unverified probe is reported as exactly that — *"probe image was not
+publicly fetchable, so no engine could see it"* — never as a finding about the person
+in the image.
 
 **Candidate image sourcing.** Logged-out social pages return almost nothing to a
 scraper, so the **SerpApi thumbnail** (the engine's own cached copy of the match) is
@@ -96,6 +109,32 @@ best-effort for its HTML hash, `og:image`, author handle, and caption — and th
 
 Every run records `path_taken`, per-source candidate counts, and query artifacts.
 
+### Stage B2 — Earliest-appearance dating  *(Internet Archive)*
+
+The question that actually settles a miscaptioning dispute is not "who is this" but
+"how long has this been online?" — an image circulating as this week's news that the
+Wayback Machine already held in 2019 is debunked by the date alone, before anyone
+argues about the face.
+
+Each source page is looked up against the Internet Archive **CDX API** (plain
+unauthenticated GET — no key, no new dependency) for its earliest and latest capture.
+This buys two things:
+
+1. **A date bound on the claim.** `earliest_known_appearance` is the oldest successful
+   capture across all source pages.
+2. **A baseline nobody in this pipeline controls.** Until now, the only "before" state
+   for *did this page change?* was a hash we took, ourselves, at attestation time — a
+   verifier had to take our word for it. An Archive capture predating our run does not.
+
+Only captures that returned **HTTP 200** date anything. The Archive holds 404s and
+redirects for URLs it probed before they existed (`bbc.com/news` has a 1999 capture
+that is a 404), and treating one as "first appearance" would date an image to before
+its page was published. Non-200 captures are still recorded, with their status code.
+
+Strictly best-effort and fully skippable (`FACEPROV_WAYBACK=0`): the Archive
+rate-limits and times out, so each lookup gets one retry and then records the error on
+the leaf rather than failing the run.
+
 ### Stage C — Face re-verification
 - For every candidate image: detect faces, embed, compute **cosine similarity** to the
   probe embedding.
@@ -113,10 +152,43 @@ A canonical JSON bundle is assembled and each leaf is hashed into a **Merkle tre
 
 1. `probe` — sha256 of probe image bytes, embedding digest, bbox, detector version
 2. `search` — engine, path taken, raw query params, timestamp, SerpApi request ids
-3. `candidate[i]` — source URL, fetched-at, sha256 of the fetched image bytes,
-   sha256 of the fetched page HTML, cosine score, accept/reject
+3. `candidate[i]` — source URL, fetched-at, sha256 of the fetched image bytes, the
+   **three-tier page fingerprint** (below), cosine score, accept/reject
 4. `match` — the winning candidate's canonical post URL + platform + author handle
-5. `run` — pipeline version, model versions, wall-clock, config hash
+5. `timeline` — earliest/latest Archive capture per source page *(schema v2; omitted
+   when empty, so bundles sealed under v1 still recompute to their original root)*
+6. `run` — pipeline version, model versions, wall-clock, config hash
+
+#### The three-tier page fingerprint
+
+A raw sha256 over page bytes is close to useless as a tamper signal. Live pages
+rewrite themselves on every request — rotating ad slots, CSRF tokens, session ids,
+view counters, build hashes in asset URLs — so a byte comparison reports "changed"
+for almost every page ever attested, and an alarm that always fires carries no
+information. Measured on four live pages fetched twice, two seconds apart:
+
+| | pages flagged as tampered (nothing actually changed) |
+|---|---|
+| raw byte hash | **2 / 4** |
+| claim fingerprint | **0 / 4** |
+
+So every page gets three nested digests, narrowest last:
+
+| tier | covers | expected to drift? |
+|---|---|---|
+| `raw_sha256` | the exact bytes fetched | constantly — advisory only |
+| `content_sha256` | canonical URL, title, description, author, og:image, visible text with boilerplate stripped | on a genuine edit |
+| `claim_sha256` | **only the page's assertion about this image**: canonical URL, og:image, author handle, title | only when someone rewrites that assertion |
+
+Two details that make the narrow tier hold still: og:image URLs are hashed by
+**path only**, because Instagram/Facebook CDN URLs carry signatures that expire within
+hours (`oh=`, `oe=`, `_nc_ht=`), and URLs are normalized to drop `utm_*`, `fbclid`
+and friends before hashing.
+
+Every value covered by a digest is published in the bundle next to it, and `claim` is
+stored as a *key subset* of `content` rather than a second copy — so a third party
+recomputes both digests from the pinned evidence alone, and the two tiers can never
+disagree about what the page said.
 
 The **Merkle root**, the bundle CID (IPFS), and a compact summary go on-chain. The full
 bundle is pinned to IPFS so re-verification is public.
@@ -134,10 +206,24 @@ bundle is pinned to IPFS so re-verification is public.
 `faceprov verify <attestation-id>`:
 1. Read the on-chain record (root, CID, timestamp).
 2. Fetch the bundle from IPFS by CID; recompute the Merkle root → must equal on-chain.
-3. Re-fetch each source page/image; recompute sha256 → flag any leaf whose hash drifted
-   ("source page changed since attestation").
-4. Re-run SFace on the winning candidate vs. the probe digest → reprint the score.
-5. Print a green/red verdict per leaf.
+3. Re-fetch each source page and image and compare all three fingerprint tiers.
+4. Re-fetch the pinned probe from IPFS, re-embed it, and recompute the cosine against
+   the winning candidate — the bundle stores the probe's embedding *digest*, not the
+   vector, so re-embedding is the honest way to close the loop.
+5. Print a graded result per leaf.
+
+**Drift is graded, not binary** — that is the whole point of the tiers:
+
+| level | meaning |
+|---|---|
+| `ok` | recomputed exactly, or only the byte tier moved |
+| `info` | changed, but this value is *expected* to change (CDN churn, engine thumbnail cache) |
+| `warn` | changed in a way worth a human look — page text edited, cosine drifted |
+| `fail` | **the sealed provenance claim no longer holds** |
+
+Verdict rolls up as `FAIL` › `PASS_WITH_WARNINGS` › `PASS`. An unreachable page or a
+login wall grades `skip`, never `fail` — "we could not check" must not read the same
+as "this was doctored".
 
 ---
 
@@ -148,12 +234,15 @@ src/faceprov/
   face.py            Stage A — detect + encode (OpenCV YuNet + SFace)
   search/
     ipfs.py          Pinata pin (probe + bundle)
-    imagehost.py     catbox upload of the probe for the search query
+    imagehost.py     verified upload of the probe for the search query
     lens.py          SerpApi Google Lens client (+ related_content fallback)
     yandex.py        SerpApi Yandex Images client (crop param)
     harvest.py       fetch source pages, extract candidate images
+    wayback.py       Stage B2 — earliest-appearance dating via Archive CDX
     router.py        entity router (Path A / Path B), engine fusion
+  content.py         three-tier page fingerprints (raw / content / claim)
   verify.py          Stage C — cosine re-verification
+  drift.py           Stage F — grading source drift (ok / info / warn / fail)
   evidence.py        Stage D — canonical bundle + keccak Merkle tree
   _keccak.py         vendored keccak-256 (no-dependency Merkle hashing)
   chain.py           Stage E/F — web3 deploy, attest, read
@@ -171,7 +260,13 @@ eval/
   recall_study.py    30-identity recall benchmark
   identities.csv     15 public figures + 15 consenting private individuals
 tests/
+  test_evidence.py   Merkle tree, bundle roundtrip, v1/v2 root compatibility
+  test_content.py    fingerprint tiers — churn must not read as tampering
+  test_drift.py      re-verification grading, degradation paths
+  test_wayback.py    CDX parsing, 404-capture handling, retries
+  test_imagehost.py  probe-host verification (the 200-then-404 failure mode)
 ```
+All 63 tests are pure — no API keys, no network. `python -m pytest tests/ -q`
 
 ---
 
@@ -218,6 +313,17 @@ from the result page. This is the easiest thing to screen-record.
 ```bash
 python -m faceprov.cli verify --id 7
 ```
+Prints a graded line per leaf (`ok` / `info` / `warn` / `FAIL`) plus the earliest
+archived appearance of the source pages.
+
+### Optional environment knobs
+| var | default | effect |
+|---|---|---|
+| `FACEPROV_MATCH_THRESHOLD` | `0.36` | SFace cosine accept threshold |
+| `FACEPROV_MAX_CANDIDATES` | `12` | candidates verified per run |
+| `FACEPROV_WAYBACK` | `1` | set `0` to skip Archive dating entirely |
+| `FACEPROV_WAYBACK_MAX_URLS` | `8` | source pages dated per run |
+| `FACEPROV_WAYBACK_TIMEOUT` | `20` | seconds per CDX request |
 
 ### Demonstrate tamper-evidence
 ```bash
@@ -254,7 +360,29 @@ asymmetry rather than hide it.)_
   seen at attestation time, which is the point.
 - **Yandex via SerpApi caps at ~4 source pages** and needs a public image URL.
 - **Deepfake robustness is out of scope** — a good synthetic face of a real person can
-  pass SFace. This tool records provenance, it is not a liveness/AIGC detector.
+  pass SFace. This tool records provenance, it is not a liveness/AIGC detector. An
+  off-the-shelf synthetic-image classifier was considered and rejected: they degrade
+  badly on generators they were not trained on and on recompressed social-media
+  images, and writing a low-reliability score into an *immutable* record next to
+  evidence that is genuinely recomputable would be actively misleading.
+- **The `content` tier is noisier than the `claim` tier** — it covers full visible
+  text, so a news page that rotates headlines in its body will `warn` on every
+  re-verification. That is why the verdict hangs on `claim`, not `content`.
+- **Archive dating bounds the page, not the photograph** — `earliest_known_appearance`
+  is the oldest capture of a *source page*, which is an upper bound on how recent the
+  image is, not proof of when the photo was taken. A page can also postdate the image
+  it carries. Same-photo-vs-same-person (perceptual hashing) is the natural next step
+  and is not implemented.
+- **Wayback coverage is uneven and slow** — social permalinks are archived far less
+  than news articles, and dating 8 URLs adds roughly 30–60s to a run. Set
+  `FACEPROV_WAYBACK=0` to skip it.
+- **Free image hosts and public IPFS gateways are volatile** — they rate-limit, get
+  abused and disappear. Both paths now try several and verify what they get rather
+  than trusting one, but a run can still fail if every host is down at once. On the
+  machine this was last run from, four of the best-known IPFS gateways (including
+  `gateway.pinata.cloud`) timed out at TCP connect while `ipfs.filebase.io` answered
+  in under two seconds — hence the fallback list, ordered by observed reliability
+  rather than popularity.
 - **Sepolia is a testnet** — records are real and explorer-visible but not
   economically secured like mainnet.
 - **No hosted website** — `faceprov serve` is a local demo UI (localhost, single

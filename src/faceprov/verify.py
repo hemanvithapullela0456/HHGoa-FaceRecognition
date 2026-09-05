@@ -8,6 +8,7 @@ from pathlib import Path
 
 import requests
 
+from .content import PageFingerprint
 from .face import Face, detect_and_encode, cosine
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; faceprov/0.1)"}
@@ -29,6 +30,9 @@ class CandidateResult:
     author_handle: str | None = None
     caption: str | None = None
     note: str = ""
+    # Tiered page fingerprint (raw / content / claim). `page_sha256` above is the raw
+    # tier, kept for v1 bundle compatibility; re-verification reads this.
+    page: dict | None = None
 
     def as_leaf(self) -> dict:
         return asdict(self)
@@ -50,6 +54,7 @@ def verify_candidate(
     threshold: float,
     fetched_at: str,
     page_html: bytes | None = None,
+    page_fingerprint: PageFingerprint | None = None,
     platform: str | None = None,
     author_handle: str | None = None,
     caption: str | None = None,
@@ -59,6 +64,7 @@ def verify_candidate(
         source_url=source_url, image_url=image_url, image_origin=image_origin,
         engine=engine, fetched_at=fetched_at, page_sha256=page_sha,
         platform=platform, author_handle=author_handle, caption=caption,
+        page=page_fingerprint.as_leaf() if page_fingerprint else None,
     )
 
     try:
