@@ -220,28 +220,69 @@ best  (property)  the accepted candidate, preferring one on a real platform, the
 
 1. Download the candidate image (`requests`, browser-ish UA). On failure → a
    `CandidateResult` with `best_cosine = -1.0`, `accepted = False`, a `note`.
-2. `image_sha256` = sha256 of the exact bytes fetched. `page_sha256` = sha256 of the
-   harvested page HTML (or `None`).
+2. `image_sha256` = sha256 of the exact bytes fetched. `page` = the three-tier
+   content fingerprint of the harvested page (§4 `content.py`); `page_sha256` is its
+   raw tier, kept as its own field for v1 bundle compatibility.
 3. Write the bytes to a temp file, run `face.detect_and_encode` on it.
 4. If no face → rejected with a note. Otherwise `best_cosine` = the **max** cosine
    between the probe embedding and any face found in the candidate image.
 5. `accepted = best_cosine ≥ threshold` (default **0.36**).
 
 `CandidateResult` carries: `source_url, image_url, image_origin, engine, fetched_at,
-image_sha256, page_sha256, best_cosine, accepted, n_faces, platform, author_handle,
-caption, note`. `as_leaf()` returns it as a plain dict — this becomes a Merkle leaf.
+image_sha256, page_sha256, page, best_cosine, accepted, n_faces, platform,
+author_handle, caption, note`. `as_leaf()` returns it as a plain dict — this becomes a
+Merkle leaf.
+
+#### Why a page needs three hashes, not one
+
+A raw sha256 over page bytes cannot function as a tamper signal. Live pages rewrite
+themselves on every request — rotating ad slots, CSRF tokens, session ids, view
+counters, cache-busting asset hashes. Fetching four real pages twice, two seconds
+apart, the raw hash differed on **two of four** with no actual content change; the
+claim fingerprint differed on **none**. An alarm that fires on half of all unchanged
+pages does not just add noise, it buries the one case that matters.
+
+So `content.fingerprint_page` emits three nested digests:
+
+| tier | covers | drifts |
+|---|---|---|
+| `raw_sha256` | exact bytes | constantly — advisory |
+| `content_sha256` | canonical URL, title, description, author, og:image key, visible text (boilerplate stripped), text length | on a genuine edit |
+| `claim_sha256` | canonical URL, og:image key, author handle, title | only when the page's assertion *about this image* changes |
+
+Two normalizations do the heavy lifting. og:image URLs are hashed by **path only**
+(`image_key`) because Instagram/Facebook CDN URLs carry signatures that expire within
+hours — hashing `oh=`/`oe=`/`_nc_ht=` would guarantee a false positive on every
+re-verification. And URLs drop `utm_*`, `fbclid`, `igshid` and friends before hashing,
+so a share button's leftovers are not a "change".
+
+**Auditability:** every value a digest covers is published in the bundle beside it, and
+`claim` is stored as a *key subset* of `content` (`claim_keys`) rather than a second
+copy — so a third party recomputes both digests from the pinned evidence alone, and
+the tiers cannot disagree about what the page said. `content.recompute(leaf)` uses the
+leaf's own `claim_keys`, so a bundle verifies against the claim definition it was
+sealed with rather than whatever the current version uses.
 
 ### Stage D — evidence bundle & Merkle root  (`evidence.py`)
 
-`pipeline.run_pipeline` assembles an `EvidenceBundle` with five section types:
+`pipeline.run_pipeline` assembles an `EvidenceBundle` with six section types:
 
 | Section | Contents |
 |---|---|
 | `probe` | image sha256, IPFS CID + URL, embedding digest, bbox (pixels + normalized), detection score, detector/encoder version strings |
 | `search` | path taken, entity name/type, query image URL + host, Lens metadata, Yandex metadata, Path-A profile results, threshold, timestamp |
 | `candidate[i]` | one per verified candidate — the full `CandidateResult` leaf |
-| `match` | if matched: the winning candidate's URL, image URL + sha256, page sha256, cosine, engine, platform, handle, caption. If not: `matched:false`, reason, and every rejected candidate with its score |
+| `match` | if matched: the winning candidate's URL, image URL + sha256, page fingerprint, cosine, engine, platform, handle, caption. If not: `matched:false`, reason, and every rejected candidate with its score |
+| `timeline` | *(v2)* per-source-page Archive facts — earliest/latest capture, status code, digest, snapshot URL — plus the derived `earliest_known_appearance` |
 | `run` | faceprov version, wall-clock seconds, a config hash, timestamp |
+
+**Schema v2 and the bundles already on chain.** `timeline` is a new leaf, and adding a
+leaf changes the Merkle root. Attestations sealed under v1 must keep verifying, so the
+section is **omitted from the leaf set when empty** — a v1 bundle produces exactly the
+leaf order it was sealed with (`probe, search, candidate[…], match, run`) and
+recomputes to its original root. `tests/test_evidence.py::test_v1_bundle_root_is_unchanged_by_the_v2_field`
+pins that guarantee; if it ever fails, live attestations have stopped verifying. The
+`schema` string itself sits outside the hashed sections, so bumping it is free.
 
 The bundle is serialized to a canonical JSON document (`to_json()`), and its
 **Merkle root** is computed (see §5). The full document is pinned to IPFS
@@ -276,12 +317,32 @@ Returns `{id, tx, explorer, block}`.
 2. `Pinata.fetch_json(cid)` → the evidence bundle (via the gateway).
 3. Rebuild `EvidenceBundle.from_json` and recompute the root. **Check 1:** does it
    equal the on-chain root?
-4. For every `candidate[i]`: re-download `image_url`, re-hash, compare to the recorded
-   `image_sha256`. A mismatch means *that source changed since attestation*.
-5. For the winning `match`: re-download the image and re-run face detection (a hook for
-   a full cosine re-check).
-6. `verdict = PASS` iff Check 1 holds and no source hash regressed to a definite
-   mismatch (unreachable sources are `skip`, not `fail`).
+4. For every `candidate[i]`: re-download `image_url` and re-harvest `source_url`,
+   then grade each tier (`drift.recheck_candidate`).
+5. For the winning `match`: re-fetch the **pinned probe from IPFS**, re-embed it, and
+   recompute the cosine against the candidate. The bundle stores the probe's embedding
+   *digest*, not the vector, so re-embedding is the only honest way to close the loop;
+   a gap over 0.02 between recorded and recomputed means the served image is no longer
+   the one that was attested.
+6. If the bundle carries a `timeline`, report `earliest_known_appearance` — the one
+   baseline in the record that this pipeline did not produce.
+7. Roll up the verdict.
+
+**Drift is graded, not binary** (`drift.py`) — this is the direct consequence of the
+three-tier fingerprint:
+
+| level | meaning | example |
+|---|---|---|
+| `ok` | recomputed exactly, or only the byte tier moved | ad slot rotated, content identical |
+| `info` | changed, but expected to | SerpApi rotated its own thumbnail cache |
+| `warn` | worth a human look, not proof | article body edited; cosine drifted |
+| `fail` | **the sealed claim no longer holds** | og:image swapped, author reattributed |
+
+`verdict_of` rolls up `FAIL` › `PASS_WITH_WARNINGS` › `PASS`. Two deliberate choices:
+an unreachable page or login wall grades `skip`, never `fail` — "we could not check"
+must not read like "this was doctored" — and a changed **thumbnail** grades `info`
+while a changed **og:image** grades `warn`, because the former is the search engine's
+cache entry and the latter is served by the source itself.
 
 **`tamper_demo(attestation_id, cfg, field_path=None, value=None)`:**
 
@@ -343,9 +404,58 @@ only the standard library — `web3` is not needed just to hash a Merkle tree.
 
 ### `faceprov/evidence.py`
 
-Covered in §5. Public surface: `sha256_bytes`, `keccak`, `merkle_root`, `merkle_proof`,
-`set_leaf_path`, and the `EvidenceBundle` dataclass (`leaves()`, `root()`, `to_json()`,
-`from_json()`).
+Covered in §5. Public surface: `canonical_json`, `sha256_bytes`, `keccak`,
+`merkle_root`, `merkle_proof`, `set_leaf_path`, and the `EvidenceBundle` dataclass
+(`leaves()`, `root()`, `to_json()`, `from_json()`).
+
+`canonical_json` is deliberately the *only* canonicalization in the codebase — every
+digest anywhere goes through it, so a third party recomputing one cannot land on a
+different byte string. `content.py` imports it rather than defining its own.
+
+### `faceprov/content.py`
+
+Three-tier page fingerprints — the reason a tamper signal is usable at all (Stage C).
+
+- `normalize_url(u)` — lowercase host, drop default ports, fragments, `utm_*`,
+  `fbclid`/`igshid`/etc., sort remaining params.
+- `image_key(u)` — `normalize_url` then drop the query entirely, because CDN image
+  URLs carry signatures that expire within hours.
+- `visible_text(soup)` — text with `script`/`style`/`nav`/`header`/`footer`/`aside`/
+  `form`/`iframe` removed and whitespace collapsed.
+- `fingerprint_page(html, url, ...) -> PageFingerprint` — the three digests plus the
+  values they cover. Never raises; unparseable bytes still yield a raw digest.
+- `recompute(leaf) -> (content_sha256, claim_sha256)` — redo both digests from a
+  stored leaf, using that leaf's own `claim_keys`.
+
+Constants worth knowing: `CLAIM_KEYS`, `TEXT_EXCERPT_CHARS` (2000 — the excerpt is
+capped so the pinned bundle stays small, and `text_chars` records the true length so a
+change past the cut-off is still detectable), `FINGERPRINT_VERSION`.
+
+### `faceprov/drift.py`
+
+Stage F grading, split out of `pipeline.py` so it is testable without web3 installed.
+
+- `check(name, level, **extra)` — one graded result line; `ok` stays a plain bool.
+- `recheck_image(i, c)` / `recheck_page(i, c, fetch=harvest)` / `recheck_candidate(...)`
+  — `recheck_page` returns `None` for a v1 bundle that sealed no fingerprint.
+- `claim_diff(sealed, fresh)` — names the fields that moved, so a `fail` says what
+  broke instead of just breaking.
+- `verdict_of(checks)` — `FAIL` › `PASS_WITH_WARNINGS` › `PASS`.
+
+The `fetch` parameter exists so tests can drive the whole grading path offline.
+
+### `faceprov/search/wayback.py`
+
+Stage B2. `lookup(url, timeout=20, retries=1) -> dict` and
+`build_timeline(urls, max_urls=8, ...) -> dict`, plus helpers `_cdx`, `_first_ok`,
+`_row`, `_iso`.
+
+Two non-obvious decisions. The CDX query is **unfiltered**: asking for
+`filter=statuscode:200` with `limit=1` makes the Archive scan forward from 2001 until
+a row passes, which times out reliably on a URL with millions of captures — so we pull
+the ten oldest rows in one cheap request and pick the successful one ourselves
+(`_first_ok`). And only HTTP-200 captures feed `earliest_known_appearance`, because the
+Archive holds 404s for URLs it probed before they existed.
 
 ### `faceprov/verify.py`
 
@@ -357,15 +467,42 @@ Covered in §5. Public surface: `sha256_bytes`, `keccak`, `merkle_root`, `merkle
 - `pin_bytes(data, name) -> cid` — `POST /pinning/pinFileToIPFS` (multipart).
 - `pin_json(obj, name) -> cid` — `POST /pinning/pinJSONToIPFS`.
 - `gateway_url(cid) -> str` — `"{gateway}/ipfs/{cid}"`.
-- `fetch_json(cid) -> dict` — GET the gateway URL.
+- `fetch_json(cid) -> dict` / `fetch_bytes(cid) -> bytes` — retrieve by CID, falling
+  through `PUBLIC_GATEWAYS` until one answers.
 
-Only `pinFileToIPFS` + `pinJSONToIPFS` scopes are needed; reads use the public gateway.
+Only `pinFileToIPFS` + `pinJSONToIPFS` scopes are needed; reads use public gateways.
+
+**Why reads fall through a gateway list.** "Anyone can re-verify this later" is the
+entire claim of the project, and it was resting on one rate-limited public gateway.
+Observed live: `verify --id 9` died with a `ReadTimeout` from `gateway.pinata.cloud`
+while the identical bytes came back from `ipfs.filebase.io` in 1.9 seconds. A CID
+addresses content, not a server, so falling through gateways cannot change *what* is
+verified — only whether the verification completes at all. The list is ordered by
+observed reliability, not popularity: on the last machine this ran from,
+`gateway.pinata.cloud`, `ipfs.io`, `dweb.link` and `w3s.link` all timed out at TCP
+connect. For the same reason `_reverify_match_face` fetches the probe **by CID**
+rather than by the single gateway URL recorded in the bundle — otherwise one
+unreachable gateway silently `skip`s the one check that re-proves the match.
 
 ### `faceprov/search/imagehost.py`
 
-`upload_catbox(data, filename) -> url` — `POST https://catbox.moe/user/api.php` with
-`reqtype=fileupload`. `host_probe(data, fallback_url) -> (url, host_label)` — try
-catbox, fall back to `fallback_url` on any exception.
+`host_probe(data, fallback_url) -> ProbeHosting` — upload the probe somewhere a search
+crawler can fetch it, then **prove it worked**: fetch the URL back and require
+`HTTP 200` plus an `image/*` content type before handing it to any engine. Hosts are
+tried in order (`uguu.se`, `catbox.moe`, `litterbox`), then the IPFS gateway URL.
+`verify_public_image(url, expect_bytes)` is the check; `ProbeHosting` carries
+`url`, `host`, `verified` and a per-host `attempts` log that is sealed into the
+`search` leaf.
+
+**Why verification is not optional.** catbox answers a rejected upload with `HTTP 200`
+and a syntactically perfect URL that serves `404` forever. The first live end-to-end
+run of this pipeline hit exactly that: both engines fetched a dead link, returned zero
+matches, and the run attested a clean `NO_MATCH_FOUND` — an infrastructure failure
+that had become indistinguishable from a finding about the person in the photo. That
+is the most dangerous failure mode this project can have, because it is silent and it
+looks like a result. Hence: verify before querying, seal `query_image_verified` into
+the bundle, and give a `NO_MATCH` under an unverified probe its own explicit reason
+string rather than "no candidate cleared threshold".
 
 ### `faceprov/search/lens.py`
 
@@ -454,14 +591,14 @@ are implemented and tested (`tests/test_evidence.py::test_merkle_proof_verifies`
    OpenZeppelin `MerkleProof` convention, so an on-chain `verify` would work unchanged.
 5. **Root:** `"0x" + root.hex()`, a `bytes32`.
 
-### 5.3 Bundle JSON shape (`schema: "faceprov/evidence-bundle/v1"`)
+### 5.3 Bundle JSON shape (`schema: "faceprov/evidence-bundle/v2"`)
 
 ```jsonc
 {
-  "schema": "faceprov/evidence-bundle/v1",
+  "schema": "faceprov/evidence-bundle/v2",
   "faceprov_version": "0.1.0",
   "merkle": { "algo": "keccak256", "pairing": "sorted",
-              "leaf_order": ["probe","search","candidate[0]",...,"match","run"],
+              "leaf_order": ["probe","search","candidate[0]",...,"match","timeline","run"],
               "root": "0x…" },
   "probe":  { "image_sha256":"0x…","image_cid":"Qm…","image_ipfs_url":"https://…",
               "embedding_digest":"0x…","bbox_pixels":[…],"bbox_norm":[…],
@@ -474,10 +611,26 @@ are implemented and tested (`tests/test_evidence.py::test_merkle_proof_verifies`
   "candidates":[ { "source_url":"…","image_url":"…","image_origin":"serpapi_thumbnail",
                    "engine":"yandex_images","fetched_at":"…","image_sha256":"0x…",
                    "page_sha256":"0x…","best_cosine":0.79,"accepted":true,"n_faces":1,
-                   "platform":null,"author_handle":null,"caption":null,"note":"" }, … ],
+                   "platform":null,"author_handle":null,"caption":null,"note":"",
+                   "page": { "version":"faceprov/page-fingerprint/v1","status":200,
+                             "raw_sha256":"0x…","content_sha256":"0x…","claim_sha256":"0x…",
+                             "claim_keys":["author_handle","canonical_url","og_image_key","title"],
+                             "content":{ "canonical_url":"…","title":"…","description":"…",
+                                         "author_handle":"@…","og_image_key":"https://cdn/…jpg",
+                                         "text_excerpt":"…","text_chars":74188 },
+                             "og_image_full":"https://cdn/…jpg?oh=…&oe=…" } }, … ],
   "match":  { "matched":true,"source_url":"…","image_url":"…","image_origin":"…",
-              "image_sha256":"0x…","page_sha256":"0x…","cosine":0.79,"engine":"…",
-              "platform":null,"author_handle":null,"caption":null,"note":"" },
+              "image_sha256":"0x…","page_sha256":"0x…","page":{…},"cosine":0.79,
+              "engine":"…","platform":null,"author_handle":null,"caption":null,"note":"" },
+  "timeline":{ "source":"web.archive.org/cdx","checked_at":"2026-…Z",
+               "earliest_known_appearance":"2019-03-04T12:00:00+00:00",
+               "earliest_url":"…","archived_count":5,"dated_count":4,
+               "checked_count":8,"errors":0,
+               "pages":{ "https://…":{ "archived":true,"error":null,
+                          "first_capture":{"timestamp":"20190304120000","datetime":"2019-…",
+                                           "statuscode":"200","archive_digest":"…",
+                                           "snapshot_url":"https://web.archive.org/web/…"},
+                          "last_capture":{…} } } },
   "run":    { "faceprov_version":"0.1.0","wall_clock_s":29.8,"config_hash":"…",
               "created_at":"2026-…Z" },
   "_pinned_cid": "Qm…"   // added after pinning; not part of the hashed sections
@@ -645,8 +798,13 @@ IPFS pin as the permanent record; fall back to the IPFS gateway URL if catbox is
 | **S3 / Cloudflare R2 / a self-hosted static server** | Another account, another key, another thing to configure and pay for. catbox needs none. |
 | **imgur** | Needs an API key and has aggressive rate limits. |
 
-**Trade-off accepted:** catbox is a volunteer-run free host with occasional downtime.
-The fallback keeps Lens working even when catbox is unavailable (Yandex recall drops in
+**Update after the first live run:** catbox now returns `HTTP 200` with a URL that
+serves `404`, so it was demoted below `uguu.se` and — more importantly — the *result
+of any upload is now verified by fetching it back* before it is handed to an engine.
+See `imagehost.py` in §4.
+
+**Trade-off accepted:** these are volunteer-run free hosts with occasional downtime.
+The fallback keeps Lens working even when they are unavailable (Yandex recall drops in
 that window). The query URL actually used is recorded in the bundle
 (`search.query_image_host`).
 
@@ -765,10 +923,16 @@ reported as "the match."
   Merkle root and IPFS CID. The block time is consensus-backed; nobody can back-date it.
 - **Integrity of the finding:** the evidence bundle at that CID hashes to that exact
   root. Change one byte of the bundle and re-verification fails (Merkle check).
-- **Integrity of the sources, at re-verification time:** every candidate image and page
-  HTML was hashed when the pipeline ran. If a source page later swaps its image,
-  `reverify` flags that specific leaf — you can see *which* source drifted and when
-  (relative to `T`).
+- **Integrity of the sources, at re-verification time:** every candidate image and
+  page was fingerprinted when the pipeline ran. If a source page later swaps its
+  image or reattributes its author, `reverify` grades that specific leaf `fail` and
+  names the changed fields — you can see *which* source drifted, in *what respect*,
+  and when (relative to `T`). Because the claim tier ignores ad churn and expiring CDN
+  signatures, a `fail` means something a person did, not something a CDN did.
+- **An age bound from a party we do not control:** where the Archive holds a capture,
+  `earliest_known_appearance` bounds how old the source page is independently of
+  anything this pipeline asserted. This is the only claim in the bundle whose evidence
+  does not originate with us.
 - **Attribution:** `attester` is the signing key. If that key is known to belong to an
   organization, the attestation is attributable to them.
 
@@ -814,7 +978,9 @@ reported as "the match."
   SerpApi-thumbnail-first strategy, but `platform`/`author_handle`/`caption` are often
   `null` because the page HTML is a login wall. A future `instagram_profile` /
   `facebook_profile` SerpApi integration would fix Path A properly.
-- **catbox.moe is a free volunteer host.** Occasional downtime; the fallback keeps Lens
+- **Free image hosts are volatile.** catbox now 200s-then-404s, which is why uploads
+  are verified and several hosts are tried; public IPFS gateways are equally uneven,
+  which is why reads fall through a list. Occasional downtime; the fallback keeps Lens
   working but drops Yandex recall for that window.
 - **SFace < ArcFace R100.** Adequate for public figures at 0.36; the InsightFace path
   is an opt-in for anyone with MSVC build tools.
@@ -844,8 +1010,12 @@ testnet gas.
 
 ## 12. Testing
 
-`tests/test_evidence.py` — 7 tests, **no network, no API keys, standard library only**
-(thanks to the vendored keccak):
+**63 tests, no network, no API keys** — the chain and search deps are not even
+importable by the suite, which is deliberate: `drift.py` and `content.py` were split
+out of `pipeline.py` precisely so the re-verification logic is testable without a
+wallet.
+
+`tests/test_evidence.py` — Merkle tree and schema compatibility:
 
 | Test | Asserts |
 |---|---|
@@ -856,8 +1026,34 @@ testnet gas.
 | `test_roundtrip_json` | `to_json` → `from_json` → same root |
 | `test_tamper_breaks_root` | `set_leaf_path` edit → root diverges (the tamper primitive) |
 | `test_set_leaf_path_keeps_type` | int/bool/float fields keep their JSON type after edit |
+| `test_v1_bundle_root_is_unchanged_by_the_v2_field` | **live attestations still verify** after the timeline leaf was added |
+| `test_timeline_is_covered_by_the_root` | back-dating `earliest_known_appearance` breaks the root |
 
-`python -m pytest -q` → `7 passed`. All modules also `py_compile`-clean.
+`tests/test_content.py` — the fingerprint tiers, mostly asserting that things did
+*not* change:
+
+| Test | Asserts |
+|---|---|
+| `test_ad_and_token_churn_does_not_move_content_or_claim` | the core claim: plumbing churn is not tampering |
+| `test_changing_the_image_breaks_the_claim` | swapped og:image → claim digest moves |
+| `test_body_edit_moves_content_but_not_the_claim` | a rewritten article warns, it does not fail |
+| `test_expiring_cdn_signature_is_not_a_change` | `oh=`/`oe=` rotation is invisible to the claim |
+| `test_leaf_recomputes_from_published_values` | a third party can redo both digests from the bundle |
+| `test_recompute_honours_the_sealed_claim_definition` | old bundles verify under their own `claim_keys` |
+| `test_fingerprint_survives_unparseable_bytes` | a fingerprint never breaks a run |
+
+`tests/test_drift.py` — re-verification grading, including every degradation path
+(`skip` on a login wall, `skip` on DNS failure, `info` vs `warn` by image origin).
+
+`tests/test_wayback.py` — CDX parsing, retry-on-transient, and
+`test_a_404_capture_never_becomes_the_headline_date` (bbc.com/news really does have a
+1999 capture that is a 404).
+
+`tests/test_imagehost.py` — probe-host verification, including
+`test_a_host_that_200s_then_404s_is_rejected`, the exact failure that made the first
+live run attest a false `NO_MATCH_FOUND`.
+
+`python -m pytest tests/ -q` → `63 passed`. All modules also `py_compile`-clean.
 
 The search / chain / IPFS paths are validated by **live end-to-end runs** (see §13 and
 the commit messages) rather than mocked unit tests — the value there is in the real API

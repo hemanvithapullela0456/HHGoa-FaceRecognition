@@ -75,3 +75,47 @@ def test_set_leaf_path_keeps_type():
     set_leaf_path(doc, "a.b", "false")
     set_leaf_path(doc, "lst.0.x", "0.9")
     assert doc == {"a": {"n": 5, "b": False}, "lst": [{"x": 0.9}]}
+
+
+# ---- schema v2: the optional `timeline` leaf ----
+
+def test_v1_bundle_root_is_unchanged_by_the_v2_field():
+    """Attestations already on chain were sealed without a timeline leaf.
+
+    v2 adds `timeline`, but omits it from the leaf set when empty, so every bundle
+    written before this change must still recompute to the exact root it was sealed
+    with. If this test ever fails, live attestations stop verifying.
+    """
+    b = _bundle()                       # no timeline set - i.e. a v1-shaped bundle
+    assert b.timeline == {}
+    assert [name for name, _ in b.ordered_sections()] == [
+        "probe", "search", "candidate[0]", "candidate[1]", "candidate[2]", "match", "run",
+    ]
+    assert len(b.leaves()) == 7
+
+
+def test_timeline_adds_a_leaf_when_present():
+    b = _bundle()
+    without = b.root()
+    b.timeline = {"earliest_known_appearance": "2019-03-04T12:00:00+00:00"}
+
+    assert len(b.leaves()) == 8
+    assert b.root() != without
+    # the timeline is evidence about the match, and is sealed between it and the run
+    assert [n for n, _ in b.ordered_sections()][-3:] == ["match", "timeline", "run"]
+
+
+def test_timeline_is_covered_by_the_root():
+    b = _bundle()
+    b.timeline = {"earliest_known_appearance": "2019-03-04T12:00:00+00:00"}
+    sealed = b.root()
+
+    doc = b.to_json()
+    set_leaf_path(doc, "timeline.earliest_known_appearance", "2024-01-01T00:00:00+00:00")
+    assert EvidenceBundle.from_json(doc).root() != sealed, "back-dating must be detectable"
+
+
+def test_timeline_survives_the_json_roundtrip():
+    b = _bundle()
+    b.timeline = {"earliest_known_appearance": "2019-03-04T12:00:00+00:00", "pages": {}}
+    assert EvidenceBundle.from_json(b.to_json()).root() == b.root()

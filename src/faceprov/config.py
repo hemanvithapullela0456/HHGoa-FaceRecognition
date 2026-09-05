@@ -46,6 +46,9 @@ class Config:
     registry_address: str
     match_threshold: float
     max_candidates: int
+    wayback_enabled: bool
+    wayback_max_urls: int
+    wayback_timeout: float
 
     def explorer_addr(self, address: str) -> str:
         return f"{self.explorer_url.rstrip('/')}/address/{address}"
@@ -66,4 +69,10 @@ class Config:
             registry_address=os.getenv("ATTESTATION_REGISTRY_ADDRESS", "").strip(),
             match_threshold=float(os.getenv("FACEPROV_MATCH_THRESHOLD", "0.36")),
             max_candidates=int(os.getenv("FACEPROV_MAX_CANDIDATES", "12")),
+            # Wayback dating is a plain unauthenticated GET, so it is on by default;
+            # set FACEPROV_WAYBACK=0 to run fully offline of the Archive.
+            wayback_enabled=os.getenv("FACEPROV_WAYBACK", "1").strip().lower()
+            not in {"0", "false", "no"},
+            wayback_max_urls=int(os.getenv("FACEPROV_WAYBACK_MAX_URLS", "8")),
+            wayback_timeout=float(os.getenv("FACEPROV_WAYBACK_TIMEOUT", "20")),
         )

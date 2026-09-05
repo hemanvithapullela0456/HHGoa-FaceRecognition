@@ -146,6 +146,7 @@ def run_search(
                 threshold=threshold,
                 fetched_at=_now(),
                 page_html=page.html or None,
+                page_fingerprint=page.fingerprint,
                 platform=page.platform or platform_of(spec.source_url),
                 author_handle=page.author_handle,
                 caption=page.description,

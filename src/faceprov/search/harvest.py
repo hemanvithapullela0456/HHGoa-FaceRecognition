@@ -15,6 +15,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from ..content import PageFingerprint, fingerprint_page
+
 UA = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -50,6 +52,9 @@ class HarvestedPage:
     description: str | None
     candidate_images: list[str] = field(default_factory=list)
     error: str | None = None
+    # Three-tier content fingerprint (see faceprov.content). None only when the fetch
+    # itself failed and there are no bytes to fingerprint.
+    fingerprint: PageFingerprint | None = None
 
 
 def platform_of(url: str) -> str | None:
@@ -93,7 +98,11 @@ def harvest(url: str, *, timeout: int = 20, retries: int = 1) -> HarvestedPage:
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception as e:  # noqa: BLE001
-        return HarvestedPage(url, html, status, platform_of(url), None, None, None, None, error=f"parse: {e}")
+        return HarvestedPage(
+            url, html, status, platform_of(url), None, None, None, None,
+            error=f"parse: {e}",
+            fingerprint=fingerprint_page(html, url, status=status),
+        )
 
     og_image = _meta(soup, "og:image", "og:image:url", "twitter:image", "twitter:image:src")
     if og_image:
@@ -108,15 +117,27 @@ def harvest(url: str, *, timeout: int = 20, retries: int = 1) -> HarvestedPage:
         if full not in imgs and not full.lower().endswith((".svg", ".gif", ".ico")):
             imgs.append(full)
 
+    author_handle = _handle(url, soup)
+    title = _meta(soup, "og:title", "twitter:title") or (
+        soup.title.string.strip() if soup.title and soup.title.string else None
+    )
+    description = _meta(soup, "og:description", "twitter:description", "description")
+
     return HarvestedPage(
         url=url,
         html=html,
         status=status,
         platform=platform_of(url),
-        author_handle=_handle(url, soup),
+        author_handle=author_handle,
         og_image=og_image,
-        title=_meta(soup, "og:title", "twitter:title") or (soup.title.string.strip() if soup.title and soup.title.string else None),
-        description=_meta(soup, "og:description", "twitter:description", "description"),
+        title=title,
+        description=description,
         candidate_images=imgs[:8],
         error=None if status == 200 else f"HTTP {status}",
+        # fingerprint the same metadata the pipeline acted on, so the sealed evidence
+        # and the decision it drove can never describe different pages
+        fingerprint=fingerprint_page(
+            html, url, status=status, title=title, description=description,
+            author_handle=author_handle, og_image=og_image,
+        ),
     )
