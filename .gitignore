@@ -13,3 +13,4 @@ eval/results.json
 *.egg-info/
 .DS_Store
 .idea/
+images/
